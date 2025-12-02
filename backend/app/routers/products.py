@@ -9,7 +9,7 @@ from typing import List, Optional
 router = APIRouter()
 
 
-@router.get("/")
+@router.get("")
 async def get_products(
     search: Optional[str] = Query(None, description="Recherche par titre, SKU, handle"),
     limit: int = Query(50, ge=1, le=250, description="Nombre de produits à retourner")
