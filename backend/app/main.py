@@ -6,7 +6,7 @@ import os
 app = FastAPI(
     title="Luxarmonie Hub API",
     description="Pricing & Management API for Luxarmonie",
-    version="1.0.0"
+    version="1.0.0",
      redirect_slashes=False
 )
 
