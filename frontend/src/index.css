@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Luxarmonie Custom Styles */
+* {
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+body {
+  @apply bg-luxarmonie-gray-50 text-luxarmonie-black;
+  letter-spacing: -0.03em;
+}
+
+/* Titles */
+h1, h2, h3, h4, h5, h6 {
+  @apply font-semibold;
+  letter-spacing: -0.04em;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-luxarmonie-gray-100;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-luxarmonie-gray-300 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-luxarmonie-gray-400;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* Focus states */
+input:focus, select:focus, button:focus {
+  @apply outline-none ring-2 ring-luxarmonie-terracotta ring-opacity-50;
+}
+
+/* Custom checkbox */
+.checkbox-luxarmonie {
+  @apply w-5 h-5 rounded border-2 border-luxarmonie-gray-300 
+         checked:bg-luxarmonie-terracotta checked:border-luxarmonie-terracotta
+         focus:ring-luxarmonie-terracotta cursor-pointer transition-all;
+}
