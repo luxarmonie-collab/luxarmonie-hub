@@ -8,6 +8,7 @@ import {
   AlertCircle,
   Search,
   ChevronDown,
+  ChevronRight,
   Loader2,
   RefreshCw
 } from 'lucide-react'
@@ -23,6 +24,8 @@ function PricingModule() {
   const [selectAllCountries, setSelectAllCountries] = useState(false)
   const [products, setProducts] = useState([])
   const [selectedProducts, setSelectedProducts] = useState([])
+  const [selectedVariants, setSelectedVariants] = useState({}) // {productId: [variantIds]}
+  const [expandedProducts, setExpandedProducts] = useState({}) // {productId: boolean}
   const [selectAllProducts, setSelectAllProducts] = useState(true)
   const [productSearch, setProductSearch] = useState('')
   const [showCountryDropdown, setShowCountryDropdown] = useState(false)
@@ -30,8 +33,8 @@ function PricingModule() {
   
   // Paramètres de pricing
   const [settings, setSettings] = useState({
-    baseAdjustment: -12,  // -12%
-    applyVat: true,
+    baseAdjustment: 10,  // +10%
+    applyVat: false,
     discount: 40  // 40% de réduction affichée
   })
   
@@ -59,7 +62,6 @@ function PricingModule() {
         { name: 'Allemagne', currency: 'EUR', vat: 0.19 },
         { name: 'USA', currency: 'USD', vat: 0 },
         { name: 'UK', currency: 'GBP', vat: 0 },
-        // ... autres pays
       ])
     }
   }
@@ -95,14 +97,100 @@ function PricingModule() {
     setSelectAllCountries(!selectAllCountries)
   }
 
+  // Gestion des produits et variantes
+  const handleProductSelect = (product) => {
+    if (!selectedProducts.find(p => p.id === product.id)) {
+      setSelectedProducts([...selectedProducts, product])
+      // Par défaut, sélectionner toutes les variantes
+      setSelectedVariants(prev => ({
+        ...prev,
+        [product.id]: product.variants.map(v => v.id)
+      }))
+    }
+    setProductSearch('')
+    setProducts([])
+  }
+
+  const handleProductRemove = (productId) => {
+    setSelectedProducts(prev => prev.filter(p => p.id !== productId))
+    setSelectedVariants(prev => {
+      const newVariants = { ...prev }
+      delete newVariants[productId]
+      return newVariants
+    })
+    setExpandedProducts(prev => {
+      const newExpanded = { ...prev }
+      delete newExpanded[productId]
+      return newExpanded
+    })
+  }
+
+  const toggleProductExpanded = (productId) => {
+    setExpandedProducts(prev => ({
+      ...prev,
+      [productId]: !prev[productId]
+    }))
+  }
+
+  const handleVariantToggle = (productId, variantId) => {
+    setSelectedVariants(prev => {
+      const current = prev[productId] || []
+      if (current.includes(variantId)) {
+        return {
+          ...prev,
+          [productId]: current.filter(id => id !== variantId)
+        }
+      } else {
+        return {
+          ...prev,
+          [productId]: [...current, variantId]
+        }
+      }
+    })
+  }
+
+  const handleSelectAllVariants = (product) => {
+    const currentSelected = selectedVariants[product.id] || []
+    const allVariantIds = product.variants.map(v => v.id)
+    
+    if (currentSelected.length === allVariantIds.length) {
+      // Désélectionner toutes
+      setSelectedVariants(prev => ({
+        ...prev,
+        [product.id]: []
+      }))
+    } else {
+      // Sélectionner toutes
+      setSelectedVariants(prev => ({
+        ...prev,
+        [product.id]: allVariantIds
+      }))
+    }
+  }
+
+  const getSelectedVariantsCount = (product) => {
+    return (selectedVariants[product.id] || []).length
+  }
+
   const handlePreview = async () => {
     try {
       setLoading(true)
       setMessage(null)
       
+      // Préparer les variantes sélectionnées
+      let variantIds = null
+      if (!selectAllProducts && selectedProducts.length > 0) {
+        variantIds = []
+        selectedProducts.forEach(product => {
+          const productVariants = selectedVariants[product.id] || []
+          variantIds.push(...productVariants)
+        })
+      }
+      
       const response = await axios.post(`${API_URL}/pricing/preview`, {
         countries: selectAllCountries ? ['all'] : selectedCountries,
         product_ids: selectAllProducts ? null : selectedProducts.map(p => p.id),
+        variant_ids: variantIds,
         base_adjustment: settings.baseAdjustment / 100,
         apply_vat: settings.applyVat,
         discount: settings.discount / 100
@@ -122,9 +210,20 @@ function PricingModule() {
       setLoading(true)
       setMessage(null)
       
+      // Préparer les variantes sélectionnées
+      let variantIds = null
+      if (!selectAllProducts && selectedProducts.length > 0) {
+        variantIds = []
+        selectedProducts.forEach(product => {
+          const productVariants = selectedVariants[product.id] || []
+          variantIds.push(...productVariants)
+        })
+      }
+      
       const response = await axios.post(`${API_URL}/pricing/apply`, {
         countries: selectAllCountries ? ['all'] : selectedCountries,
         product_ids: selectAllProducts ? null : selectedProducts.map(p => p.id),
+        variant_ids: variantIds,
         base_adjustment: settings.baseAdjustment / 100,
         apply_vat: settings.applyVat,
         discount: settings.discount / 100,
@@ -276,19 +375,23 @@ function PricingModule() {
                 className="w-full pl-10 pr-4 py-3 border border-luxarmonie-gray-200 rounded-lg focus:ring-2 focus:ring-luxarmonie-terracotta focus:border-transparent"
               />
               
+              {/* Loading */}
+              {loading && productSearch && (
+                <div className="absolute top-full left-0 right-0 mt-2 bg-white rounded-lg shadow-lg border border-luxarmonie-gray-200 p-4 z-10">
+                  <div className="flex items-center gap-2 text-luxarmonie-gray-500">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Recherche en cours...</span>
+                  </div>
+                </div>
+              )}
+              
               {/* Results */}
-              {products.length > 0 && productSearch && (
+              {products.length > 0 && productSearch && !loading && (
                 <div className="absolute top-full left-0 right-0 mt-2 bg-white rounded-lg shadow-lg border border-luxarmonie-gray-200 max-h-64 overflow-y-auto z-10">
                   {products.map((product) => (
                     <button
                       key={product.id}
-                      onClick={() => {
-                        if (!selectedProducts.find(p => p.id === product.id)) {
-                          setSelectedProducts([...selectedProducts, product])
-                        }
-                        setProductSearch('')
-                        setProducts([])
-                      }}
+                      onClick={() => handleProductSelect(product)}
                       className="w-full flex items-center gap-3 p-3 hover:bg-luxarmonie-gray-50 transition-colors text-left"
                     >
                       {product.image && (
@@ -297,7 +400,7 @@ function PricingModule() {
                       <div className="flex-1 min-w-0">
                         <p className="font-medium truncate">{product.title}</p>
                         <p className="text-sm text-luxarmonie-gray-500">
-                          {product.variantsCount} variante(s)
+                          {product.variantsCount} variante(s) • {product.variants[0]?.price}€
                         </p>
                       </div>
                     </button>
@@ -307,18 +410,78 @@ function PricingModule() {
             </div>
           )}
 
-          {/* Selected Products */}
+          {/* Selected Products with Variants */}
           {!selectAllProducts && selectedProducts.length > 0 && (
             <div className="mt-4 space-y-2">
               {selectedProducts.map((product) => (
-                <div key={product.id} className="flex items-center gap-3 p-2 bg-luxarmonie-gray-50 rounded-lg">
-                  <span className="flex-1 truncate">{product.title}</span>
-                  <button
-                    onClick={() => setSelectedProducts(prev => prev.filter(p => p.id !== product.id))}
-                    className="text-luxarmonie-gray-400 hover:text-red-500 transition-colors"
-                  >
-                    ×
-                  </button>
+                <div key={product.id} className="border border-luxarmonie-gray-200 rounded-lg overflow-hidden">
+                  {/* Product Header */}
+                  <div className="flex items-center gap-3 p-3 bg-luxarmonie-gray-50">
+                    <button
+                      onClick={() => toggleProductExpanded(product.id)}
+                      className="text-luxarmonie-gray-500 hover:text-luxarmonie-black transition-colors"
+                    >
+                      {expandedProducts[product.id] 
+                        ? <ChevronDown className="w-4 h-4" />
+                        : <ChevronRight className="w-4 h-4" />
+                      }
+                    </button>
+                    
+                    {product.image && (
+                      <img src={product.image} alt="" className="w-8 h-8 rounded object-cover" />
+                    )}
+                    
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium truncate text-sm">{product.title}</p>
+                      <p className="text-xs text-luxarmonie-gray-500">
+                        {getSelectedVariantsCount(product)}/{product.variants.length} variante(s)
+                      </p>
+                    </div>
+                    
+                    <button
+                      onClick={() => handleProductRemove(product.id)}
+                      className="text-luxarmonie-gray-400 hover:text-red-500 transition-colors text-lg"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  
+                  {/* Variants List (Expanded) */}
+                  {expandedProducts[product.id] && (
+                    <div className="p-3 space-y-1 border-t border-luxarmonie-gray-100">
+                      {/* Select All Variants */}
+                      <label className="flex items-center gap-2 p-2 bg-luxarmonie-gray-50 rounded cursor-pointer hover:bg-luxarmonie-gray-100 transition-colors mb-2">
+                        <input
+                          type="checkbox"
+                          checked={(selectedVariants[product.id] || []).length === product.variants.length}
+                          onChange={() => handleSelectAllVariants(product)}
+                          className="checkbox-luxarmonie w-4 h-4"
+                        />
+                        <span className="text-sm font-medium">Toutes les variantes</span>
+                      </label>
+                      
+                      {/* Individual Variants */}
+                      {product.variants.map((variant) => (
+                        <label
+                          key={variant.id}
+                          className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
+                            (selectedVariants[product.id] || []).includes(variant.id)
+                              ? 'bg-luxarmonie-terracotta/5'
+                              : 'hover:bg-luxarmonie-gray-50'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={(selectedVariants[product.id] || []).includes(variant.id)}
+                            onChange={() => handleVariantToggle(product.id, variant.id)}
+                            className="checkbox-luxarmonie w-4 h-4"
+                          />
+                          <span className="flex-1 text-sm truncate">{variant.title}</span>
+                          <span className="text-sm text-luxarmonie-gray-500">{variant.price}€</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -453,7 +616,7 @@ function PricingModule() {
                     <td className="py-3 px-4 text-sm">{row.title || row.sku}</td>
                     <td className="py-3 px-4 text-sm">{row.country}</td>
                     <td className="py-3 px-4 text-sm text-right text-luxarmonie-gray-500">
-                      {row.original_eur}€
+                      {row.current_price ? `${row.current_price} ${row.currency}` : `${row.original_eur}€`}
                     </td>
                     <td className="py-3 px-4 text-sm text-right font-medium">
                       {row.final_price} {row.currency}
