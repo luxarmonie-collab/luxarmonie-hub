@@ -7,7 +7,9 @@ app = FastAPI(
     title="Luxarmonie Hub API",
     description="Pricing & Management API for Luxarmonie",
     version="1.0.0"
+     redirect_slashes=False
 )
+
 
 # CORS pour le frontend
 app.add_middleware(
