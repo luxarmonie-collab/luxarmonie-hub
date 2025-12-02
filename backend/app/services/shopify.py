@@ -274,6 +274,155 @@ class ShopifyService:
         
         return None
     
+    async def get_price_list_prices(
+        self, 
+        price_list_id: str, 
+        variant_ids: List[str] = None,
+        first: int = 100
+    ) -> List[Dict]:
+        """
+        Récupère les prix d'une PriceList pour des variantes données
+        
+        Args:
+            price_list_id: ID de la PriceList (gid://shopify/PriceList/xxx)
+            variant_ids: Liste optionnelle d'IDs de variantes à filtrer
+            first: Nombre max de prix à retourner
+            
+        Returns:
+            Liste de {variantId, price, compareAtPrice, currency}
+        """
+        query = """
+        query GetPriceListPrices($priceListId: ID!, $first: Int!, $after: String) {
+            priceList(id: $priceListId) {
+                id
+                name
+                currency
+                prices(first: $first, after: $after) {
+                    edges {
+                        node {
+                            variant {
+                                id
+                            }
+                            price {
+                                amount
+                                currencyCode
+                            }
+                            compareAtPrice {
+                                amount
+                                currencyCode
+                            }
+                        }
+                        cursor
+                    }
+                    pageInfo {
+                        hasNextPage
+                    }
+                }
+            }
+        }
+        """
+        
+        gid = f"gid://shopify/PriceList/{price_list_id}" if not price_list_id.startswith("gid://") else price_list_id
+        
+        all_prices = []
+        has_next = True
+        cursor = None
+        
+        try:
+            while has_next:
+                variables = {"priceListId": gid, "first": first}
+                if cursor:
+                    variables["after"] = cursor
+                
+                result = await self.execute_query(query, variables)
+                
+                if "data" in result and result["data"]["priceList"]:
+                    price_list = result["data"]["priceList"]
+                    edges = price_list["prices"]["edges"]
+                    
+                    for edge in edges:
+                        node = edge["node"]
+                        price_data = {
+                            "variantId": node["variant"]["id"],
+                            "variantNumericId": node["variant"]["id"].split("/")[-1],
+                            "price": node["price"]["amount"],
+                            "currency": node["price"]["currencyCode"],
+                            "compareAtPrice": node["compareAtPrice"]["amount"] if node.get("compareAtPrice") else None
+                        }
+                        
+                        # Filtrer par variant_ids si fourni
+                        if variant_ids is None or price_data["variantId"] in variant_ids or price_data["variantNumericId"] in variant_ids:
+                            all_prices.append(price_data)
+                        
+                        cursor = edge["cursor"]
+                    
+                    has_next = price_list["prices"]["pageInfo"]["hasNextPage"]
+                    
+                    # Limiter pour éviter trop de requêtes
+                    if len(all_prices) >= 500:
+                        has_next = False
+                else:
+                    has_next = False
+                    
+        except Exception as e:
+            logger.error(f"Failed to get price list prices: {str(e)}")
+        
+        return all_prices
+    
+    async def get_variant_prices_by_market(
+        self,
+        variant_ids: List[str],
+        market_ids: List[str] = None
+    ) -> Dict[str, Dict[str, Dict]]:
+        """
+        Récupère les prix de variantes pour plusieurs marchés
+        
+        Args:
+            variant_ids: Liste d'IDs de variantes
+            market_ids: Liste optionnelle d'IDs de marchés (tous si None)
+            
+        Returns:
+            Dict[market_name, Dict[variant_id, {price, compareAtPrice, currency}]]
+        """
+        result = {}
+        
+        # Récupérer tous les marchés avec leurs priceLists
+        markets = await self.get_all_markets()
+        
+        for market in markets:
+            # Filtrer par market_ids si fourni
+            if market_ids and market["id"] not in market_ids and market["numericId"] not in market_ids:
+                continue
+            
+            price_list = market.get("priceList")
+            if not price_list:
+                continue
+            
+            # Récupérer les prix de cette priceList
+            prices = await self.get_price_list_prices(
+                price_list["id"],
+                variant_ids=variant_ids
+            )
+            
+            # Organiser par variant
+            market_prices = {}
+            for p in prices:
+                market_prices[p["variantId"]] = {
+                    "price": p["price"],
+                    "compareAtPrice": p["compareAtPrice"],
+                    "currency": p["currency"]
+                }
+            
+            if market_prices:
+                result[market["name"]] = {
+                    "marketId": market["id"],
+                    "currency": price_list["currency"],
+                    "priceListId": price_list["id"],
+                    "prices": market_prices
+                }
+        
+        return result
+    
     async def update_catalog_prices(
         self, 
         price_list_id: str, 
