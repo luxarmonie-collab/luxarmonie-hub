@@ -764,6 +764,34 @@ class ShopifyService:
         
         results["success"] = len(results["errors"]) == 0
         return results
+    
+    async def get_all_products_with_variants(self) -> List[Dict]:
+        """
+        Récupère tous les produits avec leurs variantes pour les promos aléatoires.
+        Retourne une liste de produits avec id, title et variants.
+        """
+        products = await self.get_all_products(max_products=5000)
+        
+        # Transformer le format pour les promos
+        result = []
+        for product in products:
+            result.append({
+                "id": product["id"],
+                "title": product.get("title", ""),
+                "handle": product.get("handle", ""),
+                "variants": [
+                    {
+                        "id": v["id"],
+                        "title": v.get("title", ""),
+                        "sku": v.get("sku", ""),
+                        "price": v.get("price", "0")
+                    }
+                    for v in product.get("variants", [])
+                ]
+            })
+        
+        logger.info(f"Retrieved {len(result)} products with variants for random promo")
+        return result
 
 
 # Instance globale
