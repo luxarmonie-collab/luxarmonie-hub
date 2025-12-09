@@ -68,9 +68,13 @@ def apply_psychological_ending(price: float, country: str) -> float:
     except (ValueError, TypeError):
         ending = 0.99
     
+    # Si ending > 1, c'est en centimes (ex: 99), convertir en décimal (0.99)
+    if ending >= 1:
+        ending = ending / 100
+    
     # Arrondir au nombre entier inférieur et ajouter la terminaison
     base = math.floor(price)
-    return base + ending
+    return round(base + ending, 2)
 
 
 def calculate_compare_at(price: float, discount_percent: float) -> float:
