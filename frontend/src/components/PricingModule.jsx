@@ -616,17 +616,20 @@ function PricingModule() {
                     <td className="py-3 px-4 text-sm">{row.title || row.sku}</td>
                     <td className="py-3 px-4 text-sm">{row.country}</td>
                     <td className="py-3 px-4 text-sm text-right text-luxarmonie-gray-500">
-                      {row.current_price ? `${row.current_price} ${row.currency}` : `${row.original_eur}€`}
+                      {row.current_price != null 
+                        ? `${row.current_price} ${row.current_currency || row.currency}` 
+                        : <span className="text-luxarmonie-gray-300 italic">Non défini</span>
+                      }
                     </td>
                     <td className="py-3 px-4 text-sm text-right font-medium">
-                      {row.final_price} {row.currency}
+                      {row.new_price} {row.currency}
                     </td>
                     <td className="py-3 px-4 text-sm text-right text-luxarmonie-gray-500">
-                      {row.compare_at} {row.currency}
+                      {row.compare_at_price} {row.currency}
                     </td>
                     <td className="py-3 px-4 text-sm text-right">
                       <span className="inline-block px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">
-                        -{row.discount}%
+                        -{row.discount_percentage}%
                       </span>
                     </td>
                   </tr>
