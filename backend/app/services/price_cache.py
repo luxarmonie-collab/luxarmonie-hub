@@ -1,17 +1,25 @@
 """
 Service de cache des prix - Charge tous les prix au démarrage
+Avec persistance JSON pour éviter de recharger à chaque redémarrage
 """
 import asyncio
+import json
 import logging
+import os
 from typing import Dict, List, Optional
 from datetime import datetime
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Chemin du fichier cache (utiliser un volume persistant sur Railway)
+CACHE_DIR = os.environ.get("CACHE_DIR", "/app/cache")
+CACHE_FILE = os.path.join(CACHE_DIR, "price_cache.json")
 
 
 class PriceCache:
     """
-    Cache global des prix par marché.
+    Cache global des prix par marché avec persistance JSON.
     Structure:
     {
         "France": {
@@ -40,6 +48,58 @@ class PriceCache:
             "total_markets": 0,
             "total_prices": 0
         }
+        
+        # Essayer de charger depuis le fichier au démarrage
+        self._load_from_file()
+    
+    def _load_from_file(self) -> bool:
+        """Charge le cache depuis le fichier JSON si disponible"""
+        try:
+            if os.path.exists(CACHE_FILE):
+                logger.info(f"Loading cache from file: {CACHE_FILE}")
+                with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                self._cache = data.get("cache", {})
+                self._last_refresh = datetime.fromisoformat(data["last_refresh"]) if data.get("last_refresh") else None
+                self._loaded = True
+                
+                total_prices = sum(len(m.get("prices", {})) for m in self._cache.values())
+                logger.info(f"Cache loaded from file: {len(self._cache)} markets, {total_prices} prices")
+                logger.info(f"Last refresh: {self._last_refresh}")
+                
+                return True
+        except Exception as e:
+            logger.warning(f"Could not load cache from file: {e}")
+        
+        return False
+    
+    def _save_to_file(self) -> bool:
+        """Sauvegarde le cache dans le fichier JSON"""
+        try:
+            # Créer le dossier si nécessaire
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            
+            data = {
+                "cache": self._cache,
+                "last_refresh": self._last_refresh.isoformat() if self._last_refresh else None,
+                "saved_at": datetime.now().isoformat()
+            }
+            
+            # Écrire dans un fichier temporaire puis renommer (atomique)
+            temp_file = CACHE_FILE + ".tmp"
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
+            
+            os.replace(temp_file, CACHE_FILE)
+            
+            file_size = os.path.getsize(CACHE_FILE) / (1024 * 1024)  # MB
+            logger.info(f"Cache saved to file: {CACHE_FILE} ({file_size:.1f} MB)")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Could not save cache to file: {e}")
+            return False
     
     @property
     def is_loaded(self) -> bool:
@@ -69,7 +129,8 @@ class PriceCache:
             "last_refresh": self._last_refresh.isoformat() if self._last_refresh else None,
             "markets_count": len(self._cache),
             "total_prices": total_prices,
-            "progress": self._load_progress
+            "progress": self._load_progress,
+            "persisted": os.path.exists(CACHE_FILE)
         }
     
     def get_price(self, market_name: str, variant_id: str) -> Optional[dict]:
@@ -142,7 +203,7 @@ class PriceCache:
     async def load_all_prices(self, shopify_service) -> bool:
         """
         Charge tous les prix de tous les marchés.
-        Appelé au démarrage du serveur.
+        Sauvegarde automatiquement dans le fichier après chargement.
         """
         if self._loading:
             logger.warning("Price cache is already loading")
@@ -215,6 +276,9 @@ class PriceCache:
             
             total_prices = sum(len(m.get("prices", {})) for m in self._cache.values())
             logger.info(f"=== PRICE CACHE LOADED: {len(self._cache)} markets, {total_prices} prices ===")
+            
+            # SAUVEGARDER DANS LE FICHIER
+            self._save_to_file()
             
             return True
             
