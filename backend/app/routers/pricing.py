@@ -402,14 +402,30 @@ async def preview_pricing(request: PricingPreviewRequest):
         all_variant_ids = [v["variant_id"] for v in variants_data if v["variant_id"]]
         
         market_prices = {}
+        cache_used = False
+        
         if request.use_market_price:
-            try:
-                market_prices = await shopify_service.get_variant_prices_by_market(
+            # Essayer d'abord le cache
+            from app.services.price_cache import price_cache
+            
+            if price_cache.is_loaded:
+                # Utiliser le cache (instantané!)
+                market_prices = price_cache.get_prices_for_variants(
                     variant_ids=all_variant_ids,
-                    market_names=countries  # Utilise les NOMS maintenant
+                    market_names=countries
                 )
-            except Exception as e:
-                print(f"Warning: Could not fetch market prices: {e}")
+                cache_used = True
+                print(f"Using cache: found prices for {len(market_prices)} markets")
+            else:
+                # Fallback: requêtes API (lent)
+                print("Cache not loaded, fetching from API...")
+                try:
+                    market_prices = await shopify_service.get_variant_prices_by_market(
+                        variant_ids=all_variant_ids,
+                        market_names=countries
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not fetch market prices: {e}")
         
         # ========================================
         # 3. CALCULER LES NOUVEAUX PRIX
@@ -501,7 +517,8 @@ async def preview_pricing(request: PricingPreviewRequest):
                 "total_products": len(variants_data),
                 "total_countries": len(countries),
                 "total_updates": len(preview),
-                "markets_with_prices": len(market_prices)
+                "markets_with_prices": len(market_prices),
+                "cache_used": cache_used
             },
             "preview": preview[:1000]  # Limite à 1000 pour l'affichage
         }
