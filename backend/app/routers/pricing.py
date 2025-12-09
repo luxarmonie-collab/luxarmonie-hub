@@ -253,7 +253,53 @@ def log_operation(operation_type: str, details: dict):
 
 @router.get("/config")
 async def get_pricing_config():
-    """Configuration actuelle du pricing"""
+    """
+    Configuration des marchés disponibles
+    Utilise le cache si chargé, sinon Shopify, sinon config statique
+    """
+    from app.services.price_cache import price_cache
+    
+    # 1. Si le cache est chargé, utiliser les marchés du cache
+    if price_cache.is_loaded:
+        countries = []
+        for market_name, market_data in price_cache._cache.items():
+            currency = market_data.get("currency", "EUR")
+            config = COUNTRIES.get(market_name, {})
+            countries.append({
+                "name": market_name,
+                "currency": currency,
+                "ending": config.get("ending", 0.99),
+                "vat": config.get("vat", 0),
+                "exchange_rate": config.get("exchange_rate", 1),
+                "adjustment": config.get("adjustment", "none"),
+                "prices_count": len(market_data.get("prices", {}))
+            })
+        countries.sort(key=lambda x: x["name"])
+        return {"countries": countries, "source": "cache"}
+    
+    # 2. Sinon, charger depuis Shopify
+    try:
+        markets = await shopify_service.get_all_markets()
+        countries = []
+        for market in markets:
+            market_name = market["name"]
+            price_list = market.get("priceList")
+            currency = price_list["currency"] if price_list else "EUR"
+            config = COUNTRIES.get(market_name, {})
+            countries.append({
+                "name": market_name,
+                "currency": currency,
+                "ending": config.get("ending", 0.99),
+                "vat": config.get("vat", 0),
+                "exchange_rate": config.get("exchange_rate", 1),
+                "adjustment": config.get("adjustment", "none")
+            })
+        countries.sort(key=lambda x: x["name"])
+        return {"countries": countries, "source": "shopify"}
+    except Exception as e:
+        print(f"Error loading markets from Shopify: {e}")
+    
+    # 3. Fallback sur config statique
     return {
         "countries": [
             {
@@ -265,7 +311,8 @@ async def get_pricing_config():
                 "adjustment": config["adjustment"]
             }
             for name, config in COUNTRIES.items()
-        ]
+        ],
+        "source": "static"
     }
 
 
