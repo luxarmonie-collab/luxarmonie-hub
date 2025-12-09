@@ -371,6 +371,7 @@ class ShopifyService:
     ) -> List[Dict]:
         """
         Récupère les prix d'une PriceList avec pagination complète
+        OPTIMISATION: Si variant_ids fourni, arrête dès qu'on a trouvé tous les prix
         """
         query = """
         query GetPriceListPrices($priceListId: ID!, $first: Int!, $after: String) {
@@ -408,21 +409,38 @@ class ShopifyService:
         all_prices = []
         has_next = True
         cursor = None
+        pages_fetched = 0
+        max_pages = 100  # Limite de sécurité
         
         # Convertir variant_ids en set pour lookup rapide
-        variant_ids_set = set(variant_ids) if variant_ids else None
+        variant_ids_set = None
+        if variant_ids:
+            # Normaliser les IDs (garder les deux formats)
+            variant_ids_set = set()
+            for vid in variant_ids:
+                variant_ids_set.add(vid)
+                # Ajouter aussi l'ID numérique si c'est un GID
+                if vid.startswith("gid://"):
+                    variant_ids_set.add(vid.split("/")[-1])
+                else:
+                    # Ajouter le format GID complet
+                    variant_ids_set.add(f"gid://shopify/ProductVariant/{vid}")
         
         try:
-            while has_next:
+            while has_next and pages_fetched < max_pages:
                 variables = {"priceListId": gid, "first": first}
                 if cursor:
                     variables["after"] = cursor
                 
                 result = await self.execute_query(query, variables)
+                pages_fetched += 1
                 
                 if "data" in result and result["data"]["priceList"]:
                     price_list = result["data"]["priceList"]
                     edges = price_list["prices"]["edges"]
+                    
+                    if not edges:
+                        break
                     
                     for edge in edges:
                         node = edge["node"]
@@ -447,19 +465,22 @@ class ShopifyService:
                     
                     has_next = price_list["prices"]["pageInfo"]["hasNextPage"]
                     
-                    # Log progress
-                    logger.info(f"PriceList {gid}: fetched {len(all_prices)} prices so far")
+                    # OPTIMISATION: Si on a trouvé tous les variant_ids demandés, on arrête
+                    if variant_ids_set and len(all_prices) >= len(variant_ids):
+                        logger.info(f"Found all {len(all_prices)} requested prices, stopping pagination")
+                        break
                     
-                    # Limiter pour éviter timeout
-                    if len(all_prices) >= 5000:
-                        logger.warning("Reached 5000 prices limit, stopping pagination")
-                        has_next = False
+                    # Log progress tous les 10 pages
+                    if pages_fetched % 10 == 0:
+                        logger.info(f"PriceList {gid}: page {pages_fetched}, found {len(all_prices)} prices so far")
+                    
                 else:
                     has_next = False
                     
         except Exception as e:
             logger.error(f"Failed to get price list prices: {str(e)}")
         
+        logger.info(f"PriceList {gid}: completed with {len(all_prices)} prices after {pages_fetched} pages")
         return all_prices
     
     async def get_variant_prices_by_market(
