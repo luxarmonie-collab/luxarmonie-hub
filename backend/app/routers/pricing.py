@@ -62,6 +62,12 @@ def apply_psychological_ending(price: float, country: str) -> float:
     config = COUNTRIES.get(country, {})
     ending = config.get("ending", 0.99)
     
+    # S'assurer que ending est un float
+    try:
+        ending = float(ending)
+    except (ValueError, TypeError):
+        ending = 0.99
+    
     # Arrondir au nombre entier inférieur et ajouter la terminaison
     base = math.floor(price)
     return base + ending
