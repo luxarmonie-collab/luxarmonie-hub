@@ -12,7 +12,9 @@ import {
   Loader2,
   RefreshCw,
   Database,
-  ServerCog
+  ServerCog,
+  Sparkles,
+  Percent
 } from 'lucide-react'
 import axios from 'axios'
 
@@ -181,6 +183,19 @@ function PricingModule() {
   // Preview
   const [preview, setPreview] = useState(null)
   const [showPreview, setShowPreview] = useState(false)
+  
+  // Progression de l'apply
+  const [applyProgress, setApplyProgress] = useState(null)
+  
+  // Promos Aléatoires
+  const [showPromoModule, setShowPromoModule] = useState(false)
+  const [promoSettings, setPromoSettings] = useState({
+    catalogPercentage: 50,
+    minDiscount: 10,
+    maxDiscount: 40
+  })
+  const [promoPreview, setPromoPreview] = useState(null)
+  const [promoSeed, setPromoSeed] = useState(null)
   
   // Messages
   const [message, setMessage] = useState(null)
@@ -364,9 +379,22 @@ function PricingModule() {
     const confirmMessage = `Vous allez modifier ${preview.summary.total_updates} prix sur ${preview.summary.total_countries} marché(s). Continuer ?`
     if (!window.confirm(confirmMessage)) return
     
+    // Fonction pour poll la progression
+    const pollProgress = async () => {
+      try {
+        const response = await axios.get(`${API_URL}/pricing/apply-progress`)
+        setApplyProgress(response.data)
+        return response.data
+      } catch (error) {
+        console.error('Error fetching progress:', error)
+        return null
+      }
+    }
+    
     try {
       setLoading(true)
       setLoadingMessage('Application des modifications en cours...')
+      setApplyProgress({ active: true, current_market: 'Démarrage...', markets_done: 0, total_markets: 0 })
       
       let variantIds = null
       let productIds = null
@@ -379,6 +407,14 @@ function PricingModule() {
           variantIds.push(...productVariants)
         })
       }
+      
+      // Démarrer le polling de progression
+      const progressInterval = setInterval(async () => {
+        const progress = await pollProgress()
+        if (progress && progress.active) {
+          setLoadingMessage(`🔄 ${progress.current_market} (${progress.markets_done}/${progress.total_markets} marchés) - ${progress.variants_updated} variantes`)
+        }
+      }, 1000)
       
       const response = await axios.post(`${API_URL}/pricing/apply`, {
         countries: selectAllCountries ? ['all'] : selectedCountries,
@@ -394,15 +430,20 @@ function PricingModule() {
         timeout: 600000 // 10 min timeout
       })
       
+      // Arrêter le polling
+      clearInterval(progressInterval)
+      setApplyProgress(null)
+      
       if (response.data.results.errors?.length > 0) {
         setMessage({ 
           type: 'warning', 
           text: `${response.data.results.updated_count} prix mis à jour. ${response.data.results.errors.length} erreur(s).`
         })
       } else {
+        const cacheMsg = response.data.results.cache_updated ? ` (cache mis à jour)` : ''
         setMessage({ 
           type: 'success', 
-          text: `✅ ${response.data.results.updated_count} prix mis à jour avec succès !`
+          text: `✅ ${response.data.results.updated_count} prix mis à jour avec succès !${cacheMsg}`
         })
       }
       
@@ -411,6 +452,110 @@ function PricingModule() {
       console.error('Apply error:', error)
       setMessage({ type: 'error', text: `Erreur: ${error.response?.data?.detail || error.message}` })
       setLoadingMessage('')
+      setApplyProgress(null)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // ========================================
+  // PROMOS ALÉATOIRES
+  // ========================================
+  
+  const handlePromoPreview = async () => {
+    try {
+      setLoading(true)
+      setLoadingMessage('Génération des promos aléatoires...')
+      setMessage(null)
+      
+      // Générer un seed pour pouvoir reproduire la même sélection
+      const newSeed = Math.floor(Math.random() * 1000000)
+      setPromoSeed(newSeed)
+      
+      const response = await axios.post(`${API_URL}/pricing/random-promo/preview`, {
+        countries: selectAllCountries ? ['all'] : selectedCountries,
+        catalog_percentage: promoSettings.catalogPercentage,
+        min_discount: promoSettings.minDiscount,
+        max_discount: promoSettings.maxDiscount,
+        seed: newSeed
+      })
+      
+      setPromoPreview(response.data)
+      setLoadingMessage('')
+    } catch (error) {
+      console.error('Promo preview error:', error)
+      setMessage({ type: 'error', text: `Erreur: ${error.response?.data?.detail || error.message}` })
+      setLoadingMessage('')
+    } finally {
+      setLoading(false)
+    }
+  }
+  
+  const handlePromoApply = async () => {
+    if (!promoPreview || !promoSeed) return
+    
+    const confirmMessage = `Vous allez appliquer des promos sur ${promoPreview.summary.products_selected} produits (${promoPreview.summary.total_price_changes} modifications). Continuer ?`
+    if (!window.confirm(confirmMessage)) return
+    
+    // Fonction pour poll la progression
+    const pollProgress = async () => {
+      try {
+        const response = await axios.get(`${API_URL}/pricing/apply-progress`)
+        setApplyProgress(response.data)
+        return response.data
+      } catch (error) {
+        return null
+      }
+    }
+    
+    try {
+      setLoading(true)
+      setLoadingMessage('Application des promos en cours...')
+      setApplyProgress({ active: true, current_market: 'Démarrage...', markets_done: 0, total_markets: 0 })
+      
+      // Démarrer le polling
+      const progressInterval = setInterval(async () => {
+        const progress = await pollProgress()
+        if (progress && progress.active) {
+          setLoadingMessage(`🎯 ${progress.current_market} (${progress.markets_done}/${progress.total_markets} marchés) - ${progress.variants_updated} variantes`)
+        }
+      }, 1000)
+      
+      const response = await axios.post(`${API_URL}/pricing/random-promo/apply`, {
+        countries: selectAllCountries ? ['all'] : selectedCountries,
+        catalog_percentage: promoSettings.catalogPercentage,
+        min_discount: promoSettings.minDiscount,
+        max_discount: promoSettings.maxDiscount,
+        seed: promoSeed,
+        dry_run: false
+      }, {
+        timeout: 600000
+      })
+      
+      clearInterval(progressInterval)
+      setApplyProgress(null)
+      
+      if (response.data.results.errors?.length > 0) {
+        setMessage({ 
+          type: 'warning', 
+          text: `${response.data.results.updated_count} prix mis à jour. ${response.data.results.errors.length} erreur(s).`
+        })
+      } else {
+        const cacheMsg = response.data.results.cache_updated ? ` (cache mis à jour)` : ''
+        setMessage({ 
+          type: 'success', 
+          text: `🎉 Promos appliquées ! ${response.data.results.updated_count} prix mis à jour sur ${promoPreview.summary.products_selected} produits${cacheMsg}`
+        })
+      }
+      
+      setPromoPreview(null)
+      setPromoSeed(null)
+      setLoadingMessage('')
+    } catch (error) {
+      console.error('Promo apply error:', error)
+      setMessage({ type: 'error', text: `Erreur: ${error.response?.data?.detail || error.message}` })
+      setLoadingMessage('')
+      setApplyProgress(null)
     } finally {
       setLoading(false)
     }
@@ -761,6 +906,223 @@ function PricingModule() {
           {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Check className="w-5 h-5" />}
           Appliquer les modifications
         </button>
+      </div>
+
+      {/* ========================================
+          MODULE PROMOS ALÉATOIRES
+          ======================================== */}
+      <div className="mt-8 bg-gradient-to-r from-purple-50 to-pink-50 rounded-2xl border border-purple-200 p-6">
+        <div 
+          className="flex items-center justify-between cursor-pointer"
+          onClick={() => setShowPromoModule(!showPromoModule)}
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-purple-100 flex items-center justify-center">
+              <Sparkles className="w-5 h-5 text-purple-600" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold tracking-title text-purple-900">🎯 Promos Aléatoires</h2>
+              <p className="text-sm text-purple-600">
+                Générez des promotions sur une partie de votre catalogue
+              </p>
+            </div>
+          </div>
+          <ChevronDown className={`w-5 h-5 text-purple-400 transition-transform ${showPromoModule ? 'rotate-180' : ''}`} />
+        </div>
+
+        {showPromoModule && (
+          <div className="mt-6 space-y-6">
+            {/* Paramètres */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {/* % du catalogue */}
+              <div className="bg-white rounded-xl p-4 shadow-sm">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <Percent className="w-4 h-4 inline mr-1" />
+                  % du catalogue en promo
+                </label>
+                <input
+                  type="range"
+                  min="10"
+                  max="100"
+                  step="5"
+                  value={promoSettings.catalogPercentage}
+                  onChange={(e) => setPromoSettings(prev => ({ ...prev, catalogPercentage: parseInt(e.target.value) }))}
+                  className="w-full h-2 bg-purple-200 rounded-lg appearance-none cursor-pointer"
+                />
+                <div className="flex justify-between mt-2">
+                  <span className="text-xs text-gray-500">10%</span>
+                  <span className="text-lg font-bold text-purple-600">{promoSettings.catalogPercentage}%</span>
+                  <span className="text-xs text-gray-500">100%</span>
+                </div>
+              </div>
+
+              {/* Réduction min */}
+              <div className="bg-white rounded-xl p-4 shadow-sm">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Réduction minimum
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="5"
+                    max={promoSettings.maxDiscount - 5}
+                    value={promoSettings.minDiscount}
+                    onChange={(e) => setPromoSettings(prev => ({ ...prev, minDiscount: parseInt(e.target.value) || 5 }))}
+                    className="flex-1 px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  />
+                  <span className="text-gray-500 font-medium">%</span>
+                </div>
+              </div>
+
+              {/* Réduction max */}
+              <div className="bg-white rounded-xl p-4 shadow-sm">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Réduction maximum
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={promoSettings.minDiscount + 5}
+                    max="80"
+                    value={promoSettings.maxDiscount}
+                    onChange={(e) => setPromoSettings(prev => ({ ...prev, maxDiscount: parseInt(e.target.value) || 40 }))}
+                    className="flex-1 px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  />
+                  <span className="text-gray-500 font-medium">%</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Info */}
+            <div className="bg-purple-100 rounded-lg p-4 text-sm text-purple-800">
+              <strong>💡 Comment ça marche :</strong>
+              <ul className="mt-2 space-y-1 list-disc list-inside">
+                <li><strong>{promoSettings.catalogPercentage}%</strong> de vos produits seront sélectionnés au hasard</li>
+                <li>Chaque produit recevra une réduction entre <strong>{promoSettings.minDiscount}%</strong> et <strong>{promoSettings.maxDiscount}%</strong></li>
+                <li>Toutes les variantes d'un produit ont la même réduction</li>
+                <li>Les prix actuels deviennent les prix barrés (Compare At)</li>
+              </ul>
+            </div>
+
+            {/* Boutons */}
+            <div className="flex items-center gap-4">
+              <button
+                onClick={handlePromoPreview}
+                disabled={loading || (selectedCountries.length === 0 && !selectAllCountries)}
+                className="flex items-center gap-2 px-6 py-3 bg-purple-100 text-purple-700 rounded-lg font-medium hover:bg-purple-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Eye className="w-5 h-5" />}
+                Générer les promos
+              </button>
+              
+              <button
+                onClick={handlePromoApply}
+                disabled={loading || !promoPreview}
+                className="flex items-center gap-2 px-6 py-3 bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
+                Appliquer les promos
+              </button>
+            </div>
+
+            {/* Preview des promos */}
+            {promoPreview && (
+              <div className="bg-white rounded-xl p-6 shadow-sm border border-purple-200">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-semibold text-purple-900">
+                    🎲 Sélection aléatoire générée
+                  </h3>
+                  <button
+                    onClick={() => { setPromoPreview(null); setPromoSeed(null); }}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                {/* Résumé */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                  <div className="bg-purple-50 rounded-lg p-3 text-center">
+                    <div className="text-2xl font-bold text-purple-600">{promoPreview.summary.products_selected}</div>
+                    <div className="text-xs text-purple-500">Produits en promo</div>
+                  </div>
+                  <div className="bg-purple-50 rounded-lg p-3 text-center">
+                    <div className="text-2xl font-bold text-purple-600">{promoPreview.summary.total_products_in_catalog}</div>
+                    <div className="text-xs text-purple-500">Total catalogue</div>
+                  </div>
+                  <div className="bg-purple-50 rounded-lg p-3 text-center">
+                    <div className="text-2xl font-bold text-purple-600">{promoPreview.summary.total_markets}</div>
+                    <div className="text-xs text-purple-500">Marchés</div>
+                  </div>
+                  <div className="bg-purple-50 rounded-lg p-3 text-center">
+                    <div className="text-2xl font-bold text-purple-600">{promoPreview.summary.total_price_changes}</div>
+                    <div className="text-xs text-purple-500">Modifications</div>
+                  </div>
+                </div>
+
+                {/* Liste des produits sélectionnés */}
+                <div className="mb-4">
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">Produits sélectionnés :</h4>
+                  <div className="max-h-48 overflow-y-auto bg-gray-50 rounded-lg p-3">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {promoPreview.products?.slice(0, 50).map((product, idx) => (
+                        <div key={idx} className="flex items-center justify-between bg-white rounded px-3 py-2 text-sm">
+                          <span className="truncate flex-1" title={product.title}>{product.title}</span>
+                          <span className="ml-2 px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">
+                            -{product.discount}%
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {promoPreview.products?.length > 50 && (
+                      <p className="text-xs text-gray-500 mt-2 text-center">
+                        Et {promoPreview.products.length - 50} autres produits...
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Aperçu des prix */}
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">Aperçu des modifications :</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-200">
+                          <th className="text-left py-2 px-3">Produit</th>
+                          <th className="text-left py-2 px-3">Marché</th>
+                          <th className="text-right py-2 px-3">Ancien prix</th>
+                          <th className="text-right py-2 px-3">Nouveau prix</th>
+                          <th className="text-right py-2 px-3">Réduction</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {promoPreview.preview?.slice(0, 20).map((row, idx) => (
+                          <tr key={idx} className="border-b border-gray-100">
+                            <td className="py-2 px-3 truncate max-w-[200px]" title={row.product_title}>{row.product_title}</td>
+                            <td className="py-2 px-3">{row.country}</td>
+                            <td className="py-2 px-3 text-right text-gray-500 line-through">{row.current_price} {row.currency}</td>
+                            <td className="py-2 px-3 text-right font-medium text-green-600">{row.new_price} {row.currency}</td>
+                            <td className="py-2 px-3 text-right">
+                              <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">
+                                -{row.discount_percentage}%
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {promoPreview.preview?.length > 20 && (
+                      <p className="text-xs text-gray-500 mt-2 text-center">
+                        Et {promoPreview.preview.length - 20} autres modifications...
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Preview Panel */}
