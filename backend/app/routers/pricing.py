@@ -57,12 +57,154 @@ class ExchangeRatesUpdate(BaseModel):
 # HELPERS
 # ========================================
 
+# ========================================
+# FONCTIONS DE TERMINAISON PAR CULTURE
+# ========================================
+
+def round_99(price: float) -> float:
+    """Low-context: .99 (USA, UK, France, Canada, Australie...)"""
+    return float(math.floor(price)) + 0.99
+
+def round_95(price: float) -> float:
+    """Allemagne, Autriche, Suisse: .95"""
+    return float(math.floor(price)) + 0.95
+
+def round_00(price: float) -> float:
+    """High-context: .00 (Brésil, Argentine, Italie, Hong Kong, Singapour...)"""
+    return float(round(price))
+
+def round_9_int(price: float) -> float:
+    """Moyen-Orient: entier finissant en 9"""
+    base = int(price)
+    last = base % 10
+    if last == 9:
+        return float(base)
+    elif last < 9:
+        return float(base - last + 9) if base >= 10 else float(9)
+    return float(base - 1)
+
+def round_000(price: float) -> float:
+    """Grandes devises: milliers (Chili, Colombie, Paraguay)"""
+    thousands = round(price / 1000)
+    return float(max(thousands, 1) * 1000)
+
+def round_990(price: float) -> float:
+    """HUF, CZK, RSD: en 990/90/9"""
+    base = int(price)
+    if base >= 10000:
+        return float((base // 1000) * 1000 + 990)
+    elif base >= 1000:
+        return float((base // 100) * 100 + 90)
+    else:
+        return float((base // 10) * 10 + 9)
+
+def round_kr(price: float) -> float:
+    """Scandinave DKK/SEK: multiples de 5"""
+    return float(round(price / 5) * 5)
+
+
+# Mapping des pays vers leur fonction de terminaison
+COUNTRY_ROUNDING = {
+    # .99
+    'France': round_99,
+    'USA': round_99,
+    'UK': round_99,
+    'Canada': round_99,
+    'Australie': round_99,
+    'Nouvelle Zelande': round_99,
+    'Nouvelle-Zélande': round_99,
+    'Belgique': round_99,
+    'Espagne': round_99,
+    'Pays-Bas': round_99,
+    'Luxembourg': round_99,
+    'Estonie': round_99,
+    'Grece': round_99,
+    'Grèce': round_99,
+    'Irlande': round_99,
+    'Portugal': round_99,
+    'Croatie': round_99,
+    'Finlande': round_99,
+    'Pologne': round_99,
+    'Mexique': round_99,
+    'Israel': round_99,
+    'Israël': round_99,
+    'Perou': round_99,
+    'Pérou': round_99,
+    'Bolivie': round_99,
+    'Guatemala': round_99,
+    'Honduras': round_99,
+    'Turquie': round_99,
+    
+    # .95
+    'Allemagne': round_95,
+    'Germany': round_95,
+    'Autriche': round_95,
+    'Suisse': round_95,
+    
+    # .00 (high-context / entier)
+    'Italie': round_00,
+    'Bresil': round_00,
+    'Brésil': round_00,
+    'Hong Kong': round_00,
+    'Singapour': round_00,
+    'Argentine': round_00,
+    'Norvege': round_00,
+    'Norvège': round_00,
+    'Uruguay': round_00,
+    'Costa Rica': round_00,
+    'Afrique du Sud': round_00,
+    'Oman': round_00,
+    'Panama': round_00,
+    'Salvador': round_00,
+    'Malaisie': round_00,
+    'Jordanie': round_00,
+    'Koweit': round_00,
+    'Koweït': round_00,
+    'Liban': round_00,
+    'Bahrein': round_00,
+    'Bahreïn': round_00,
+    'Equateur': round_00,
+    'Équateur': round_00,
+    'Republique Dominicaine': round_00,
+    'République Dominicaine': round_00,
+    
+    # Scandinave (multiples de 5)
+    'Danemark': round_kr,
+    'Suede': round_kr,
+    'Suède': round_kr,
+    
+    # 990
+    'Hongrie': round_990,
+    'Republique Tcheque': round_990,
+    'République Tchèque': round_990,
+    'Tchéquie': round_990,
+    'Serbie': round_990,
+    
+    # Entier en 9 (Moyen-Orient)
+    'Arabie Saoudite': round_9_int,
+    'UAE': round_9_int,
+    'Émirats arabes unis': round_9_int,
+    'Qatar': round_9_int,
+    
+    # Milliers
+    'Chili': round_000,
+    'Colombie': round_000,
+    'Paraguay': round_000,
+}
+
+
 def apply_psychological_ending(price: float, country: str) -> float:
     """Applique la terminaison psychologique selon le pays"""
+    # Utiliser la fonction de terminaison appropriée
+    round_func = COUNTRY_ROUNDING.get(country)
+    
+    if round_func:
+        return round_func(price)
+    
+    # Fallback: utiliser la config COUNTRIES si disponible
     config = COUNTRIES.get(country, {})
     ending = config.get("ending", 0.99)
     
-    # S'assurer que ending est un float
     try:
         ending = float(ending)
     except (ValueError, TypeError):
@@ -72,7 +214,6 @@ def apply_psychological_ending(price: float, country: str) -> float:
     if ending >= 1:
         ending = ending / 100
     
-    # Arrondir au nombre entier inférieur et ajouter la terminaison
     base = math.floor(price)
     return round(base + ending, 2)
 
