@@ -6,6 +6,7 @@ V3 - Calcul basé sur prix ACTUEL du marché + tous les produits
 from fastapi import APIRouter, HTTPException
 from app.services.shopify import shopify_service
 from app.services.pricing_engine import pricing_engine, PricingOperation
+from app.services.price_cache import price_cache
 from app.config.countries import COUNTRIES, get_all_countries
 from typing import List, Optional
 from pydantic import BaseModel
@@ -13,6 +14,16 @@ from datetime import datetime
 import math
 
 router = APIRouter(tags=["pricing"])
+
+# Variable globale pour suivre la progression de l'apply
+apply_progress = {
+    "active": False,
+    "current_market": "",
+    "markets_done": 0,
+    "total_markets": 0,
+    "variants_updated": 0,
+    "errors": []
+}
 
 
 # ========================================
@@ -588,9 +599,21 @@ async def preview_pricing(request: PricingPreviewRequest):
 async def apply_pricing(request: PricingApplyRequest):
     """
     Applique les changements de prix sur Shopify
-    V3: Support tous produits + calcul sur prix marché
+    V3: Support tous produits + calcul sur prix marché + mise à jour cache
     """
+    global apply_progress
+    
     try:
+        # Initialiser la progression
+        apply_progress = {
+            "active": True,
+            "current_market": "Préparation...",
+            "markets_done": 0,
+            "total_markets": len(request.countries),
+            "variants_updated": 0,
+            "errors": []
+        }
+        
         # Générer la preview pour avoir les prix calculés
         preview_request = PricingPreviewRequest(
             countries=request.countries,
@@ -607,6 +630,7 @@ async def apply_pricing(request: PricingApplyRequest):
         preview_data = preview_result["preview"]
         
         if request.dry_run:
+            apply_progress["active"] = False
             return {
                 "applied": False,
                 "dry_run": True,
@@ -626,30 +650,64 @@ async def apply_pricing(request: PricingApplyRequest):
                 "compare_at_price": item["compare_at_price"]
             })
         
-        results = {"success": [], "errors": [], "updated_count": 0}
+        apply_progress["total_markets"] = len(updates_by_country)
         
-        for country, updates in updates_by_country.items():
+        results = {"success": [], "errors": [], "updated_count": 0}
+        cache_updates = []  # Pour mettre à jour le cache
+        
+        for idx, (country, updates) in enumerate(updates_by_country.items()):
+            # Mettre à jour la progression
+            apply_progress["current_market"] = country
+            apply_progress["markets_done"] = idx
+            
             try:
                 update_result = await shopify_service.bulk_update_prices(country, updates)
                 
                 if update_result.get("success"):
+                    updated_count = update_result.get("updated", len(updates))
                     results["success"].append({
                         "country": country,
-                        "updated": update_result.get("updated", len(updates))
+                        "updated": updated_count
                     })
-                    results["updated_count"] += update_result.get("updated", 0)
+                    results["updated_count"] += updated_count
+                    apply_progress["variants_updated"] += updated_count
+                    
+                    # Préparer les mises à jour du cache
+                    for update in updates:
+                        cache_updates.append({
+                            "market": country,
+                            "variant_id": update["variant_id"],
+                            "price": update["price"],
+                            "compare_at_price": update["compare_at_price"]
+                        })
                 else:
-                    results["errors"].append(f"{country}: {update_result.get('error')}")
+                    error_msg = f"{country}: {update_result.get('error')}"
+                    results["errors"].append(error_msg)
+                    apply_progress["errors"].append(error_msg)
                     if update_result.get("errors"):
                         for err in update_result["errors"]:
                             results["errors"].append(f"{country}: {err}")
+                            apply_progress["errors"].append(f"{country}: {err}")
                             
             except Exception as e:
-                results["errors"].append(f"{country}: {str(e)}")
+                error_msg = f"{country}: {str(e)}"
+                results["errors"].append(error_msg)
+                apply_progress["errors"].append(error_msg)
+        
+        # Mettre à jour le cache avec les nouveaux prix
+        if cache_updates:
+            cache_updated = price_cache.update_prices(cache_updates, save=True)
+            results["cache_updated"] = cache_updated
+        
+        # Finaliser la progression
+        apply_progress["current_market"] = "Terminé"
+        apply_progress["markets_done"] = len(updates_by_country)
+        apply_progress["active"] = False
         
         log_operation("pricing_apply", {
             "countries": list(updates_by_country.keys()),
             "total_updates": results["updated_count"],
+            "cache_updates": len(cache_updates),
             "errors_count": len(results["errors"])
         })
         
@@ -659,9 +717,17 @@ async def apply_pricing(request: PricingApplyRequest):
         }
     
     except Exception as e:
+        apply_progress["active"] = False
+        apply_progress["errors"].append(str(e))
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/apply-progress")
+async def get_apply_progress():
+    """Retourne la progression de l'apply en cours"""
+    return apply_progress
 
 
 @router.get("/history")
@@ -671,3 +737,266 @@ async def get_history():
         "total": len(pricing_history),
         "operations": pricing_history[-20:]
     }
+
+
+# ========================================
+# PROMOS ALÉATOIRES
+# ========================================
+
+import random
+
+class RandomPromoRequest(BaseModel):
+    """Paramètres pour les promos aléatoires"""
+    countries: List[str]                    # Marchés cibles
+    catalog_percentage: float = 50.0        # % du catalogue à mettre en promo (0-100)
+    min_discount: float = 10.0              # Réduction minimum (%)
+    max_discount: float = 40.0              # Réduction maximum (%)
+    seed: Optional[int] = None              # Seed pour reproductibilité (optionnel)
+
+
+class RandomPromoApplyRequest(RandomPromoRequest):
+    """Paramètres pour appliquer les promos"""
+    dry_run: bool = False
+
+
+@router.post("/random-promo/preview")
+async def preview_random_promo(request: RandomPromoRequest):
+    """
+    Génère une preview des promos aléatoires.
+    - Sélectionne X% des PRODUITS (pas variantes) aléatoirement
+    - Attribue une réduction aléatoire entre min et max à chaque produit
+    - Toutes les variantes d'un produit ont la même réduction
+    """
+    try:
+        # Initialiser le générateur aléatoire
+        if request.seed is not None:
+            random.seed(request.seed)
+        else:
+            random.seed()
+        
+        # Récupérer tous les produits avec leurs variantes
+        all_products = await shopify_service.get_all_products_with_variants()
+        
+        if not all_products:
+            raise HTTPException(status_code=404, detail="Aucun produit trouvé")
+        
+        total_products = len(all_products)
+        
+        # Calculer combien de produits mettre en promo
+        promo_count = int(total_products * (request.catalog_percentage / 100))
+        promo_count = max(1, min(promo_count, total_products))  # Au moins 1, max tous
+        
+        # Sélectionner aléatoirement les produits
+        selected_products = random.sample(all_products, promo_count)
+        
+        # Attribuer une réduction aléatoire à chaque produit
+        product_discounts = {}
+        for product in selected_products:
+            discount = random.uniform(request.min_discount, request.max_discount)
+            discount = round(discount, 0)  # Arrondir au %
+            product_discounts[product["id"]] = discount
+        
+        # Déterminer les marchés
+        if 'all' in request.countries:
+            countries = price_cache.get_all_markets()
+        else:
+            countries = request.countries
+        
+        # Générer la preview
+        preview_items = []
+        
+        for product in selected_products:
+            product_id = product["id"]
+            discount_pct = product_discounts[product_id]
+            
+            for variant in product.get("variants", []):
+                variant_id = variant["id"]
+                
+                for country in countries:
+                    # Récupérer le prix actuel du cache
+                    cached = price_cache.get_price(country, variant_id)
+                    
+                    if cached:
+                        current_price = float(cached.get("price", 0))
+                        currency = cached.get("currency", "EUR")
+                    else:
+                        continue  # Pas de prix pour ce marché
+                    
+                    if current_price <= 0:
+                        continue
+                    
+                    # Calculer le nouveau prix (prix actuel = nouveau compare_at, prix réduit = nouveau prix)
+                    compare_at_price = current_price  # L'ancien prix devient le compare_at
+                    reduction_factor = 1 - (discount_pct / 100)
+                    new_price_raw = current_price * reduction_factor
+                    
+                    # Appliquer la terminaison psychologique
+                    new_price = apply_psychological_ending(new_price_raw, country)
+                    
+                    # Formater
+                    new_price_str = format_price_for_country(new_price, country)
+                    compare_at_str = format_price_for_country(compare_at_price, country)
+                    
+                    preview_items.append({
+                        "product_id": product_id,
+                        "product_title": product.get("title", ""),
+                        "variant_id": variant_id,
+                        "variant_title": variant.get("title", ""),
+                        "sku": variant.get("sku", ""),
+                        "country": country,
+                        "currency": currency,
+                        "current_price": f"{current_price:.2f}",
+                        "new_price": new_price_str,
+                        "compare_at_price": compare_at_str,
+                        "discount_percentage": discount_pct
+                    })
+        
+        # Résumé par produit
+        products_summary = []
+        for product in selected_products:
+            products_summary.append({
+                "id": product["id"],
+                "title": product.get("title", ""),
+                "variants_count": len(product.get("variants", [])),
+                "discount": product_discounts[product["id"]]
+            })
+        
+        return {
+            "summary": {
+                "total_products_in_catalog": total_products,
+                "products_selected": promo_count,
+                "catalog_percentage": request.catalog_percentage,
+                "min_discount": request.min_discount,
+                "max_discount": request.max_discount,
+                "total_markets": len(countries),
+                "total_price_changes": len(preview_items)
+            },
+            "products": products_summary[:100],  # Limiter pour l'affichage
+            "preview": preview_items[:500]  # Limiter pour l'affichage
+        }
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/random-promo/apply")
+async def apply_random_promo(request: RandomPromoApplyRequest):
+    """
+    Applique les promos aléatoires sur Shopify.
+    Utilise le même seed que le preview pour garantir les mêmes produits.
+    """
+    global apply_progress
+    
+    try:
+        # Générer la même preview (avec le même seed si fourni)
+        preview_request = RandomPromoRequest(
+            countries=request.countries,
+            catalog_percentage=request.catalog_percentage,
+            min_discount=request.min_discount,
+            max_discount=request.max_discount,
+            seed=request.seed
+        )
+        
+        preview_result = await preview_random_promo(preview_request)
+        preview_data = preview_result["preview"]
+        
+        if request.dry_run:
+            return {
+                "applied": False,
+                "dry_run": True,
+                "would_update": len(preview_data),
+                "summary": preview_result["summary"]
+            }
+        
+        # Initialiser la progression
+        apply_progress = {
+            "active": True,
+            "current_market": "Préparation promos...",
+            "markets_done": 0,
+            "total_markets": 0,
+            "variants_updated": 0,
+            "errors": []
+        }
+        
+        # Grouper par pays
+        updates_by_country = {}
+        for item in preview_data:
+            country = item["country"]
+            if country not in updates_by_country:
+                updates_by_country[country] = []
+            updates_by_country[country].append({
+                "variant_id": item["variant_id"],
+                "price": item["new_price"],
+                "compare_at_price": item["compare_at_price"]
+            })
+        
+        apply_progress["total_markets"] = len(updates_by_country)
+        
+        results = {"success": [], "errors": [], "updated_count": 0}
+        cache_updates = []
+        
+        for idx, (country, updates) in enumerate(updates_by_country.items()):
+            apply_progress["current_market"] = country
+            apply_progress["markets_done"] = idx
+            
+            try:
+                update_result = await shopify_service.bulk_update_prices(country, updates)
+                
+                if update_result.get("success"):
+                    updated_count = update_result.get("updated", len(updates))
+                    results["success"].append({
+                        "country": country,
+                        "updated": updated_count
+                    })
+                    results["updated_count"] += updated_count
+                    apply_progress["variants_updated"] += updated_count
+                    
+                    # Préparer les mises à jour du cache
+                    for update in updates:
+                        cache_updates.append({
+                            "market": country,
+                            "variant_id": update["variant_id"],
+                            "price": update["price"],
+                            "compare_at_price": update["compare_at_price"]
+                        })
+                else:
+                    error_msg = f"{country}: {update_result.get('error')}"
+                    results["errors"].append(error_msg)
+                    apply_progress["errors"].append(error_msg)
+                    
+            except Exception as e:
+                error_msg = f"{country}: {str(e)}"
+                results["errors"].append(error_msg)
+                apply_progress["errors"].append(error_msg)
+        
+        # Mettre à jour le cache
+        if cache_updates:
+            cache_updated = price_cache.update_prices(cache_updates, save=True)
+            results["cache_updated"] = cache_updated
+        
+        # Finaliser
+        apply_progress["current_market"] = "Terminé"
+        apply_progress["markets_done"] = len(updates_by_country)
+        apply_progress["active"] = False
+        
+        log_operation("random_promo_apply", {
+            "products_count": preview_result["summary"]["products_selected"],
+            "catalog_percentage": request.catalog_percentage,
+            "discount_range": f"{request.min_discount}%-{request.max_discount}%",
+            "total_updates": results["updated_count"],
+            "errors_count": len(results["errors"])
+        })
+        
+        return {
+            "applied": True,
+            "summary": preview_result["summary"],
+            "results": results
+        }
+    
+    except Exception as e:
+        apply_progress["active"] = False
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
