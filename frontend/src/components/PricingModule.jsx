@@ -22,18 +22,30 @@ const API_BASE = import.meta.env.VITE_API_URL || ''
 // ========================================
 // COMPOSANT STATUS DU CACHE
 // ========================================
-function CacheStatus() {
+function CacheStatus({ onCacheLoaded }) {
   const [status, setStatus] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [wasLoading, setWasLoading] = useState(false)
 
   const fetchStatus = useCallback(async () => {
     try {
       const response = await axios.get(`${API_URL}/cache/status`)
-      setStatus(response.data)
+      const newStatus = response.data
+      
+      // Si le cache vient de finir de charger, notifier le parent
+      if (wasLoading && newStatus.loaded && !newStatus.loading) {
+        console.log("Cache finished loading, reloading countries...")
+        if (onCacheLoaded) {
+          onCacheLoaded()
+        }
+      }
+      
+      setWasLoading(newStatus.loading)
+      setStatus(newStatus)
     } catch (error) {
       console.error('Error fetching cache status:', error)
     }
-  }, [])
+  }, [onCacheLoaded, wasLoading])
 
   useEffect(() => {
     fetchStatus()
@@ -415,7 +427,7 @@ function PricingModule() {
       </div>
 
       {/* Cache Status */}
-      <CacheStatus />
+      <CacheStatus onCacheLoaded={loadCountries} />
 
       {/* Message */}
       {message && (
