@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from datetime import datetime
 import math
 
-router = APIRouter(prefix="/api/pricing", tags=["pricing"])
+router = APIRouter(tags=["pricing"])
 
 
 # ========================================
