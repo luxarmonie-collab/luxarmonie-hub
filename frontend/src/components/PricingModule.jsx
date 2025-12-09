@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { 
   Globe, 
   Package, 
@@ -11,11 +11,137 @@ import {
   ChevronRight,
   Loader2,
   RefreshCw,
-  Database
+  Database,
+  ServerCog
 } from 'lucide-react'
 import axios from 'axios'
 
 const API_URL = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api` : '/api'
+const API_BASE = import.meta.env.VITE_API_URL || ''
+
+// ========================================
+// COMPOSANT STATUS DU CACHE
+// ========================================
+function CacheStatus() {
+  const [status, setStatus] = useState(null)
+  const [refreshing, setRefreshing] = useState(false)
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const response = await axios.get(`${API_URL}/cache/status`)
+      setStatus(response.data)
+    } catch (error) {
+      console.error('Error fetching cache status:', error)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchStatus()
+    // Polling toutes les 5 secondes si le cache est en cours de chargement
+    const interval = setInterval(() => {
+      fetchStatus()
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [fetchStatus])
+
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    try {
+      await axios.post(`${API_URL}/cache/refresh`)
+      // Le polling va mettre à jour le statut
+    } catch (error) {
+      console.error('Error refreshing cache:', error)
+    }
+    setTimeout(() => setRefreshing(false), 2000)
+  }
+
+  if (!status) {
+    return (
+      <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
+        <div className="flex items-center gap-2 text-gray-500">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          <span>Connexion au serveur...</span>
+        </div>
+      </div>
+    )
+  }
+
+  const isLoading = status.loading
+  const isLoaded = status.loaded
+
+  return (
+    <div className={`border rounded-lg p-4 mb-6 ${
+      isLoaded ? 'bg-green-50 border-green-200' : 
+      isLoading ? 'bg-yellow-50 border-yellow-200' : 
+      'bg-gray-50 border-gray-200'
+    }`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <ServerCog className={`w-5 h-5 ${
+            isLoaded ? 'text-green-600' : 
+            isLoading ? 'text-yellow-600' : 
+            'text-gray-400'
+          }`} />
+          <div>
+            <div className="font-medium text-gray-900">
+              {isLoaded ? '✅ Cache des prix chargé' : 
+               isLoading ? '⏳ Chargement du cache en cours...' : 
+               '⚠️ Cache non chargé'}
+            </div>
+            <div className="text-sm text-gray-500">
+              {isLoaded && (
+                <>
+                  {status.markets_count} marchés • {status.total_prices?.toLocaleString()} prix
+                  {status.last_refresh && (
+                    <span className="ml-2">
+                      • MàJ: {new Date(status.last_refresh).toLocaleTimeString()}
+                    </span>
+                  )}
+                </>
+              )}
+              {isLoading && status.progress && (
+                <>
+                  {status.progress.current_market} ({status.progress.markets_done}/{status.progress.total_markets})
+                  • {status.progress.total_prices?.toLocaleString()} prix chargés
+                </>
+              )}
+              {!isLoaded && !isLoading && (
+                <span>Cliquez sur Rafraîchir pour charger les prix actuels</span>
+              )}
+            </div>
+          </div>
+        </div>
+        <button
+          onClick={handleRefresh}
+          disabled={isLoading || refreshing}
+          className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+            isLoading || refreshing 
+              ? 'bg-gray-100 text-gray-400 cursor-not-allowed' 
+              : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50'
+          }`}
+        >
+          <RefreshCw className={`w-4 h-4 ${(isLoading || refreshing) ? 'animate-spin' : ''}`} />
+          {isLoading ? 'Chargement...' : 'Rafraîchir'}
+        </button>
+      </div>
+      
+      {isLoading && status.progress && (
+        <div className="mt-3">
+          <div className="w-full bg-yellow-100 rounded-full h-2">
+            <div 
+              className="bg-yellow-500 h-2 rounded-full transition-all duration-500"
+              style={{ 
+                width: `${status.progress.total_markets > 0 
+                  ? (status.progress.markets_done / status.progress.total_markets) * 100 
+                  : 0}%` 
+              }}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 function PricingModule() {
   // États
@@ -287,6 +413,9 @@ function PricingModule() {
           Modifiez les prix sur vos marchés internationaux
         </p>
       </div>
+
+      {/* Cache Status */}
+      <CacheStatus />
 
       {/* Message */}
       {message && (
