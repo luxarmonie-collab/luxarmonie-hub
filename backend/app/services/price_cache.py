@@ -357,5 +357,62 @@ class PriceCache:
         return all_prices
 
 
+    def update_prices(self, updates: List[dict], save: bool = True) -> int:
+        """
+        Met à jour les prix dans le cache après un Apply.
+        
+        Args:
+            updates: Liste de {"market": str, "variant_id": str, "price": str, "compare_at_price": str}
+            save: Sauvegarder dans le fichier après mise à jour
+            
+        Returns:
+            Nombre de prix mis à jour
+        """
+        updated_count = 0
+        
+        for update in updates:
+            market_name = update.get("market")
+            variant_id = update.get("variant_id")
+            new_price = update.get("price")
+            compare_at = update.get("compare_at_price")
+            
+            if not market_name or not variant_id:
+                continue
+            
+            if market_name not in self._cache:
+                logger.warning(f"Market {market_name} not in cache, skipping update")
+                continue
+            
+            # Normaliser l'ID variant
+            if not variant_id.startswith("gid://"):
+                gid = f"gid://shopify/ProductVariant/{variant_id}"
+            else:
+                gid = variant_id
+            
+            # Mettre à jour le prix
+            if "prices" not in self._cache[market_name]:
+                self._cache[market_name]["prices"] = {}
+            
+            self._cache[market_name]["prices"][gid] = {
+                "price": str(new_price),
+                "compareAtPrice": str(compare_at) if compare_at else None,
+                "currency": self._cache[market_name].get("currency", "EUR")
+            }
+            updated_count += 1
+        
+        if updated_count > 0:
+            logger.info(f"Cache updated with {updated_count} new prices")
+            self._last_refresh = datetime.now()
+            
+            if save:
+                self._save_to_file()
+        
+        return updated_count
+    
+    def get_all_markets(self) -> List[str]:
+        """Retourne la liste de tous les marchés dans le cache"""
+        return list(self._cache.keys())
+
+
 # Instance globale du cache
 price_cache = PriceCache()
