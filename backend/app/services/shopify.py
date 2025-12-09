@@ -1,6 +1,6 @@
 """
 Service Shopify GraphQL pour Luxarmonie
-Gère toutes les interactions avec l'API Shopify
+V3 - Fix: matching marchés par nom + pagination produits + récupération tous produits
 """
 
 import httpx
@@ -43,9 +43,8 @@ class ShopifyService:
     async def execute_query(self, query: str, variables: dict = None) -> dict:
         """Exécute une requête GraphQL"""
         logger.info(f"Shopify request to: {self.graphql_url}")
-        logger.info(f"Token preview: {self.access_token[:15]}..." if self.access_token else "NO TOKEN!")
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             payload = {"query": query}
             if variables:
                 payload["variables"] = variables
@@ -60,7 +59,6 @@ class ShopifyService:
                 
                 result = response.json()
                 
-                # Log errors if any
                 if "errors" in result:
                     logger.error(f"GraphQL errors: {result['errors']}")
                 
@@ -125,7 +123,6 @@ class ShopifyService:
                     
                     for edge in edges:
                         market = edge["node"]
-                        # Extraire l'ID numérique du GID
                         market["numericId"] = market["id"].split("/")[-1]
                         all_markets.append(market)
                         cursor = edge["cursor"]
@@ -143,11 +140,11 @@ class ShopifyService:
         return all_markets
     
     # ========================================
-    # PRODUCTS
+    # PRODUCTS - AVEC PAGINATION COMPLÈTE
     # ========================================
     
     async def search_products(self, search: str = "", first: int = 50) -> List[Dict]:
-        """Recherche des produits"""
+        """Recherche des produits (limité à first)"""
         query = """
         query SearchProducts($first: Int!, $query: String) {
             products(first: $first, query: $query) {
@@ -178,14 +175,13 @@ class ShopifyService:
         """
         
         try:
-            result = await self.execute_query(query, {"first": first, "query": search})
+            result = await self.execute_query(query, {"first": min(first, 250), "query": search})
             
             if "data" in result and "products" in result["data"]:
                 products = []
                 for edge in result["data"]["products"]["edges"]:
                     product = edge["node"]
                     product["numericId"] = product["id"].split("/")[-1]
-                    # Flatten variants
                     product["variants"] = [
                         {
                             **v["node"],
@@ -199,6 +195,92 @@ class ShopifyService:
             logger.error(f"Failed to search products: {str(e)}")
         
         return []
+    
+    async def get_all_products(self, max_products: int = 2000) -> List[Dict]:
+        """
+        Récupère TOUS les produits avec pagination
+        
+        Args:
+            max_products: Limite max de produits (défaut 2000)
+            
+        Returns:
+            Liste de tous les produits avec leurs variantes
+        """
+        query = """
+        query GetAllProducts($first: Int!, $after: String) {
+            products(first: $first, after: $after) {
+                edges {
+                    node {
+                        id
+                        title
+                        handle
+                        status
+                        featuredImage {
+                            url(transform: {maxWidth: 100})
+                        }
+                        variants(first: 100) {
+                            edges {
+                                node {
+                                    id
+                                    sku
+                                    title
+                                    price
+                                    compareAtPrice
+                                }
+                            }
+                        }
+                    }
+                    cursor
+                }
+                pageInfo {
+                    hasNextPage
+                }
+            }
+        }
+        """
+        
+        all_products = []
+        has_next = True
+        cursor = None
+        batch_size = 250  # Max Shopify permet
+        
+        logger.info(f"Starting to fetch all products (max: {max_products})")
+        
+        while has_next and len(all_products) < max_products:
+            variables = {"first": batch_size}
+            if cursor:
+                variables["after"] = cursor
+            
+            try:
+                result = await self.execute_query(query, variables)
+                
+                if "data" in result and "products" in result["data"]:
+                    edges = result["data"]["products"]["edges"]
+                    logger.info(f"Fetched {len(edges)} products (total: {len(all_products) + len(edges)})")
+                    
+                    for edge in edges:
+                        product = edge["node"]
+                        product["numericId"] = product["id"].split("/")[-1]
+                        product["variants"] = [
+                            {
+                                **v["node"],
+                                "numericId": v["node"]["id"].split("/")[-1]
+                            }
+                            for v in product["variants"]["edges"]
+                        ]
+                        all_products.append(product)
+                        cursor = edge["cursor"]
+                    
+                    has_next = result["data"]["products"]["pageInfo"]["hasNextPage"]
+                else:
+                    has_next = False
+                    
+            except Exception as e:
+                logger.error(f"Failed to get products batch: {str(e)}")
+                has_next = False
+        
+        logger.info(f"Total products fetched: {len(all_products)}")
+        return all_products
     
     async def get_product_by_id(self, product_id: str) -> Optional[Dict]:
         """Récupère un produit par son ID"""
@@ -235,7 +317,14 @@ class ShopifyService:
             
             if "data" in result and result["data"]["product"]:
                 product = result["data"]["product"]
-                product["variants"] = [v["node"] for v in product["variants"]["edges"]]
+                product["numericId"] = product["id"].split("/")[-1]
+                product["variants"] = [
+                    {
+                        **v["node"],
+                        "numericId": v["node"]["id"].split("/")[-1]
+                    }
+                    for v in product["variants"]["edges"]
+                ]
                 return product
         except Exception as e:
             logger.error(f"Failed to get product: {str(e)}")
@@ -243,11 +332,11 @@ class ShopifyService:
         return None
     
     # ========================================
-    # CATALOG PRICING
+    # PRICE LISTS
     # ========================================
     
-    async def get_catalog_price_list(self, market_id: str) -> Optional[Dict]:
-        """Récupère la price list d'un marché"""
+    async def get_price_list_for_market(self, market_id: str) -> Optional[Dict]:
+        """Récupère le PriceList d'un marché"""
         query = """
         query GetMarketPriceList($marketId: ID!) {
             market(id: $marketId) {
@@ -278,18 +367,10 @@ class ShopifyService:
         self, 
         price_list_id: str, 
         variant_ids: List[str] = None,
-        first: int = 100
+        first: int = 250
     ) -> List[Dict]:
         """
-        Récupère les prix d'une PriceList pour des variantes données
-        
-        Args:
-            price_list_id: ID de la PriceList (gid://shopify/PriceList/xxx)
-            variant_ids: Liste optionnelle d'IDs de variantes à filtrer
-            first: Nombre max de prix à retourner
-            
-        Returns:
-            Liste de {variantId, price, compareAtPrice, currency}
+        Récupère les prix d'une PriceList avec pagination complète
         """
         query = """
         query GetPriceListPrices($priceListId: ID!, $first: Int!, $after: String) {
@@ -328,6 +409,9 @@ class ShopifyService:
         has_next = True
         cursor = None
         
+        # Convertir variant_ids en set pour lookup rapide
+        variant_ids_set = set(variant_ids) if variant_ids else None
+        
         try:
             while has_next:
                 variables = {"priceListId": gid, "first": first}
@@ -342,24 +426,33 @@ class ShopifyService:
                     
                     for edge in edges:
                         node = edge["node"]
+                        variant_id = node["variant"]["id"]
+                        variant_numeric = variant_id.split("/")[-1]
+                        
+                        # Filtrer par variant_ids si fourni
+                        if variant_ids_set:
+                            if variant_id not in variant_ids_set and variant_numeric not in variant_ids_set:
+                                cursor = edge["cursor"]
+                                continue
+                        
                         price_data = {
-                            "variantId": node["variant"]["id"],
-                            "variantNumericId": node["variant"]["id"].split("/")[-1],
+                            "variantId": variant_id,
+                            "variantNumericId": variant_numeric,
                             "price": node["price"]["amount"],
                             "currency": node["price"]["currencyCode"],
                             "compareAtPrice": node["compareAtPrice"]["amount"] if node.get("compareAtPrice") else None
                         }
-                        
-                        # Filtrer par variant_ids si fourni
-                        if variant_ids is None or price_data["variantId"] in variant_ids or price_data["variantNumericId"] in variant_ids:
-                            all_prices.append(price_data)
-                        
+                        all_prices.append(price_data)
                         cursor = edge["cursor"]
                     
                     has_next = price_list["prices"]["pageInfo"]["hasNextPage"]
                     
-                    # Limiter pour éviter trop de requêtes
-                    if len(all_prices) >= 500:
+                    # Log progress
+                    logger.info(f"PriceList {gid}: fetched {len(all_prices)} prices so far")
+                    
+                    # Limiter pour éviter timeout
+                    if len(all_prices) >= 5000:
+                        logger.warning("Reached 5000 prices limit, stopping pagination")
                         has_next = False
                 else:
                     has_next = False
@@ -372,37 +465,48 @@ class ShopifyService:
     async def get_variant_prices_by_market(
         self,
         variant_ids: List[str],
-        market_ids: List[str] = None
-    ) -> Dict[str, Dict[str, Dict]]:
+        market_names: List[str] = None
+    ) -> Dict[str, Dict]:
         """
         Récupère les prix de variantes pour plusieurs marchés
         
         Args:
             variant_ids: Liste d'IDs de variantes
-            market_ids: Liste optionnelle d'IDs de marchés (tous si None)
+            market_names: Liste de NOMS de marchés ("France", "Australie", etc.)
             
         Returns:
-            Dict[market_name, Dict[variant_id, {price, compareAtPrice, currency}]]
+            Dict[market_name, {marketId, currency, priceListId, prices: Dict[variant_id, {...}]}]
         """
         result = {}
         
-        # Récupérer tous les marchés avec leurs priceLists
+        # Récupérer tous les marchés
         markets = await self.get_all_markets()
+        logger.info(f"Checking {len(markets)} markets for prices")
+        
+        # Normaliser les noms de marchés demandés
+        market_names_set = set(market_names) if market_names else None
         
         for market in markets:
-            # Filtrer par market_ids si fourni
-            if market_ids and market["id"] not in market_ids and market["numericId"] not in market_ids:
+            market_name = market["name"]
+            
+            # *** FIX: Comparer par NOM, pas par ID ***
+            if market_names_set and market_name not in market_names_set:
                 continue
             
             price_list = market.get("priceList")
             if not price_list:
+                logger.warning(f"Market {market_name} has no priceList")
                 continue
+            
+            logger.info(f"Fetching prices for market: {market_name} (PriceList: {price_list['id']})")
             
             # Récupérer les prix de cette priceList
             prices = await self.get_price_list_prices(
                 price_list["id"],
                 variant_ids=variant_ids
             )
+            
+            logger.info(f"Found {len(prices)} prices for market {market_name}")
             
             # Organiser par variant
             market_prices = {}
@@ -413,14 +517,14 @@ class ShopifyService:
                     "currency": p["currency"]
                 }
             
-            if market_prices:
-                result[market["name"]] = {
-                    "marketId": market["id"],
-                    "currency": price_list["currency"],
-                    "priceListId": price_list["id"],
-                    "prices": market_prices
-                }
+            result[market_name] = {
+                "marketId": market["id"],
+                "currency": price_list["currency"],
+                "priceListId": price_list["id"],
+                "prices": market_prices
+            }
         
+        logger.info(f"Prices fetched for {len(result)} markets")
         return result
     
     async def update_catalog_prices(
@@ -430,10 +534,6 @@ class ShopifyService:
     ) -> Dict:
         """
         Met à jour les prix dans un catalogue
-        
-        Args:
-            price_list_id: ID du price list (gid://shopify/PriceList/xxx)
-            price_updates: Liste de {variantId, price, compareAtPrice, currencyCode}
         """
         mutation = """
         mutation priceListFixedPricesAdd($priceListId: ID!, $prices: [PriceListPriceInput!]!) {
@@ -455,7 +555,6 @@ class ShopifyService:
         }
         """
         
-        # Formater les prix pour l'API
         prices = []
         for update in price_updates:
             price_input = {
@@ -481,6 +580,62 @@ class ShopifyService:
         except Exception as e:
             logger.error(f"Failed to update prices: {str(e)}")
             return {"error": str(e)}
+    
+    async def bulk_update_prices(self, market_name: str, updates: List[Dict]) -> Dict:
+        """
+        Met à jour les prix en bulk pour un marché donné
+        
+        Args:
+            market_name: Nom du marché ("France", "Australie", etc.)
+            updates: Liste de {variant_id, price, compare_at_price}
+        """
+        # Trouver le marché et sa PriceList
+        markets = await self.get_all_markets()
+        
+        target_market = None
+        for market in markets:
+            if market["name"] == market_name:
+                target_market = market
+                break
+        
+        if not target_market:
+            return {"success": False, "error": f"Market '{market_name}' not found"}
+        
+        price_list = target_market.get("priceList")
+        if not price_list:
+            return {"success": False, "error": f"Market '{market_name}' has no PriceList"}
+        
+        # Formater les updates
+        price_updates = []
+        for update in updates:
+            price_updates.append({
+                "variantId": update["variant_id"],
+                "price": update["price"],
+                "compareAtPrice": update.get("compare_at_price"),
+                "currencyCode": price_list["currency"]
+            })
+        
+        # Appliquer par batches de 100
+        batch_size = 100
+        results = {"success": True, "updated": 0, "errors": []}
+        
+        for i in range(0, len(price_updates), batch_size):
+            batch = price_updates[i:i + batch_size]
+            
+            result = await self.update_catalog_prices(price_list["id"], batch)
+            
+            if "error" in result:
+                results["errors"].append(result["error"])
+            elif "data" in result:
+                user_errors = result["data"].get("priceListFixedPricesAdd", {}).get("userErrors", [])
+                if user_errors:
+                    for err in user_errors:
+                        results["errors"].append(f"{err['field']}: {err['message']}")
+                else:
+                    results["updated"] += len(batch)
+        
+        results["success"] = len(results["errors"]) == 0
+        return results
 
 
 # Instance globale
