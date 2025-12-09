@@ -490,14 +490,10 @@ class ShopifyService:
     ) -> Dict[str, Dict]:
         """
         Récupère les prix de variantes pour plusieurs marchés
-        
-        Args:
-            variant_ids: Liste d'IDs de variantes
-            market_names: Liste de NOMS de marchés ("France", "Australie", etc.)
-            
-        Returns:
-            Dict[market_name, {marketId, currency, priceListId, prices: Dict[variant_id, {...}]}]
+        OPTIMISÉ: Parallélisation + limite de pagination stricte
         """
+        import asyncio
+        
         result = {}
         
         # Récupérer tous les marchés
@@ -507,46 +503,157 @@ class ShopifyService:
         # Normaliser les noms de marchés demandés
         market_names_set = set(market_names) if market_names else None
         
+        # Filtrer les marchés à traiter
+        markets_to_process = []
         for market in markets:
             market_name = market["name"]
-            
-            # *** FIX: Comparer par NOM, pas par ID ***
             if market_names_set and market_name not in market_names_set:
                 continue
-            
             price_list = market.get("priceList")
             if not price_list:
-                logger.warning(f"Market {market_name} has no priceList")
                 continue
+            markets_to_process.append(market)
+        
+        logger.info(f"Processing {len(markets_to_process)} markets with PriceLists")
+        
+        # Fonction pour traiter un marché
+        async def process_market(market):
+            market_name = market["name"]
+            price_list = market["priceList"]
             
-            logger.info(f"Fetching prices for market: {market_name} (PriceList: {price_list['id']})")
-            
-            # Récupérer les prix de cette priceList
-            prices = await self.get_price_list_prices(
-                price_list["id"],
-                variant_ids=variant_ids
-            )
-            
-            logger.info(f"Found {len(prices)} prices for market {market_name}")
-            
-            # Organiser par variant
-            market_prices = {}
-            for p in prices:
-                market_prices[p["variantId"]] = {
-                    "price": p["price"],
-                    "compareAtPrice": p["compareAtPrice"],
-                    "currency": p["currency"]
+            try:
+                prices = await self.get_price_list_prices_fast(
+                    price_list["id"],
+                    variant_ids=variant_ids,
+                    max_pages=10  # Limite stricte
+                )
+                
+                market_prices = {}
+                for p in prices:
+                    market_prices[p["variantId"]] = {
+                        "price": p["price"],
+                        "compareAtPrice": p["compareAtPrice"],
+                        "currency": p["currency"]
+                    }
+                
+                return market_name, {
+                    "marketId": market["id"],
+                    "currency": price_list["currency"],
+                    "priceListId": price_list["id"],
+                    "prices": market_prices
                 }
+            except Exception as e:
+                logger.error(f"Error processing market {market_name}: {e}")
+                return market_name, None
+        
+        # Traiter les marchés en parallèle par batches de 5
+        batch_size = 5
+        for i in range(0, len(markets_to_process), batch_size):
+            batch = markets_to_process[i:i + batch_size]
+            tasks = [process_market(m) for m in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            result[market_name] = {
-                "marketId": market["id"],
-                "currency": price_list["currency"],
-                "priceListId": price_list["id"],
-                "prices": market_prices
-            }
+            for res in results:
+                if isinstance(res, Exception):
+                    continue
+                if res and res[1]:
+                    result[res[0]] = res[1]
         
         logger.info(f"Prices fetched for {len(result)} markets")
         return result
+    
+    async def get_price_list_prices_fast(
+        self, 
+        price_list_id: str, 
+        variant_ids: List[str] = None,
+        max_pages: int = 10
+    ) -> List[Dict]:
+        """
+        Version rapide avec limite de pages stricte
+        """
+        query = """
+        query GetPriceListPrices($priceListId: ID!, $first: Int!, $after: String) {
+            priceList(id: $priceListId) {
+                id
+                currency
+                prices(first: $first, after: $after) {
+                    edges {
+                        node {
+                            variant { id }
+                            price { amount currencyCode }
+                            compareAtPrice { amount }
+                        }
+                        cursor
+                    }
+                    pageInfo { hasNextPage }
+                }
+            }
+        }
+        """
+        
+        gid = f"gid://shopify/PriceList/{price_list_id}" if not price_list_id.startswith("gid://") else price_list_id
+        
+        all_prices = []
+        has_next = True
+        cursor = None
+        pages = 0
+        
+        # Normaliser variant_ids
+        variant_ids_set = set()
+        if variant_ids:
+            for vid in variant_ids:
+                variant_ids_set.add(vid)
+                if vid.startswith("gid://"):
+                    variant_ids_set.add(vid.split("/")[-1])
+                else:
+                    variant_ids_set.add(f"gid://shopify/ProductVariant/{vid}")
+        
+        try:
+            while has_next and pages < max_pages:
+                variables = {"priceListId": gid, "first": 250}
+                if cursor:
+                    variables["after"] = cursor
+                
+                result = await self.execute_query(query, variables)
+                pages += 1
+                
+                if "data" in result and result["data"]["priceList"]:
+                    price_list = result["data"]["priceList"]
+                    edges = price_list["prices"]["edges"]
+                    
+                    if not edges:
+                        break
+                    
+                    for edge in edges:
+                        node = edge["node"]
+                        variant_id = node["variant"]["id"]
+                        variant_numeric = variant_id.split("/")[-1]
+                        cursor = edge["cursor"]
+                        
+                        if variant_ids_set:
+                            if variant_id not in variant_ids_set and variant_numeric not in variant_ids_set:
+                                continue
+                        
+                        all_prices.append({
+                            "variantId": variant_id,
+                            "variantNumericId": variant_numeric,
+                            "price": node["price"]["amount"],
+                            "currency": node["price"]["currencyCode"],
+                            "compareAtPrice": node["compareAtPrice"]["amount"] if node.get("compareAtPrice") else None
+                        })
+                    
+                    has_next = price_list["prices"]["pageInfo"]["hasNextPage"]
+                    
+                    # Arrêt anticipé si tous trouvés
+                    if variant_ids_set and len(all_prices) >= len(variant_ids):
+                        break
+                else:
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Error in get_price_list_prices_fast: {e}")
+        
+        return all_prices
     
     async def update_catalog_prices(
         self, 
