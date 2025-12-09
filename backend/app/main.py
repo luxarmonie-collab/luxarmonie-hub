@@ -70,11 +70,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(pricing.router)
-app.include_router(products.router)
-app.include_router(markets.router)
-app.include_router(cache_router)
+# Include routers WITH PREFIXES
+app.include_router(pricing.router, prefix="/api/pricing")
+app.include_router(products.router, prefix="/api/products")
+app.include_router(markets.router, prefix="/api/markets")
+app.include_router(cache_router)  # cache_router a déjà le préfixe /api/cache
 
 
 @app.get("/")
