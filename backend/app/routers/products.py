@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.services.shopify import shopify_service
 from typing import List, Optional
 
-router = APIRouter()
+router = APIRouter(prefix="/api/products", tags=["products"])
 
 
 @router.get("")
