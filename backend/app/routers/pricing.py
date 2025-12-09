@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from datetime import datetime
 import math
 
-router = APIRouter()
+router = APIRouter(prefix="/api/pricing", tags=["pricing"])
 
 
 # ========================================
@@ -261,6 +261,7 @@ async def get_pricing_config():
     
     # 1. Si le cache est chargé, utiliser les marchés du cache
     if price_cache.is_loaded:
+        print("CONFIG: Using cache for markets list")
         countries = []
         for market_name, market_data in price_cache._cache.items():
             currency = market_data.get("currency", "EUR")
@@ -277,9 +278,12 @@ async def get_pricing_config():
         countries.sort(key=lambda x: x["name"])
         return {"countries": countries, "source": "cache"}
     
-    # 2. Sinon, charger depuis Shopify
+    # 2. Toujours essayer Shopify (même pendant le chargement du cache)
+    print("CONFIG: Cache not loaded, fetching from Shopify...")
     try:
         markets = await shopify_service.get_all_markets()
+        print(f"CONFIG: Got {len(markets)} markets from Shopify")
+        
         countries = []
         for market in markets:
             market_name = market["name"]
@@ -295,11 +299,15 @@ async def get_pricing_config():
                 "adjustment": config.get("adjustment", "none")
             })
         countries.sort(key=lambda x: x["name"])
+        print(f"CONFIG: Returning {len(countries)} countries from Shopify")
         return {"countries": countries, "source": "shopify"}
     except Exception as e:
-        print(f"Error loading markets from Shopify: {e}")
+        print(f"CONFIG ERROR: Failed to load from Shopify: {e}")
+        import traceback
+        traceback.print_exc()
     
-    # 3. Fallback sur config statique
+    # 3. Fallback sur config statique (ne devrait jamais arriver)
+    print(f"CONFIG: Using static fallback with {len(COUNTRIES)} countries")
     return {
         "countries": [
             {
