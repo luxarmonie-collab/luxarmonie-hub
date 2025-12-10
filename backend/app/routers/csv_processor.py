@@ -210,17 +210,21 @@ async def analyze_csv(file: UploadFile = File(...)):
         price_cols = [col for col in df.columns if ' price' in col and 'compare' not in col]
         countries = [col.replace(' price', '') for col in price_cols]
         
+        # NE PAS renvoyer de sample pour éviter les problèmes de NaN
+        # Le sample n'est pas utilisé dans le frontend de toute façon
+        
         return {
             "success": True,
             "filename": file.filename,
             "variants_count": len(df),
             "countries_count": len(countries),
             "countries": countries,
-            "columns": list(df.columns)[:20],
-            "sample": df.head(3).to_dict(orient='records')
+            "columns": list(df.columns)[:20]
         }
     except Exception as e:
         logger.error(f"CSV analysis error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=400, detail=str(e))
 
 
