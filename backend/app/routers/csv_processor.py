@@ -1,6 +1,7 @@
 """
 Router pour le traitement CSV des prix Matrixify
 Upload CSV → Modification → Download CSV modifié
+Format de sortie compatible Matrixify : Price / [Pays], Compare At Price / [Pays]
 """
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
@@ -102,6 +103,43 @@ def get_rounding_function(country: str):
     return COUNTRY_ROUNDING.get(country, round_99)
 
 
+def detect_csv_format(df: pd.DataFrame) -> str:
+    """
+    Détecte le format du CSV uploadé
+    Returns: 'matrixify' ou 'ablestar'
+    """
+    cols = df.columns.tolist()
+    
+    # Format Matrixify: "Price / France", "Compare At Price / France"
+    if any('Price / ' in col for col in cols):
+        return 'matrixify'
+    
+    # Format Ablestar: "France price", "France compare-at price"
+    if any(' price' in col for col in cols):
+        return 'ablestar'
+    
+    return 'unknown'
+
+
+def extract_country_from_column(col: str, csv_format: str) -> tuple:
+    """
+    Extrait le nom du pays et le type de colonne
+    Returns: (country, column_type) ou (None, None)
+    """
+    if csv_format == 'matrixify':
+        if col.startswith('Price / '):
+            return col.replace('Price / ', ''), 'price'
+        elif col.startswith('Compare At Price / '):
+            return col.replace('Compare At Price / ', ''), 'compare_at'
+    elif csv_format == 'ablestar':
+        if ' compare-at price' in col:
+            return col.replace(' compare-at price', ''), 'compare_at'
+        elif ' price' in col:
+            return col.replace(' price', ''), 'price'
+    
+    return None, None
+
+
 def process_csv(
     df: pd.DataFrame,
     adjustment_pct: float = 0,
@@ -115,16 +153,25 @@ def process_csv(
     """
     Traite le CSV avec les modifications demandées
     """
-    # Trouver les colonnes de prix
-    price_cols = [col for col in df.columns if ' price' in col and 'compare' not in col]
+    csv_format = detect_csv_format(df)
+    logger.info(f"Detected CSV format: {csv_format}")
+    
+    # Trouver les colonnes de prix selon le format
+    if csv_format == 'matrixify':
+        price_cols = [col for col in df.columns if col.startswith('Price / ')]
+    else:  # ablestar
+        price_cols = [col for col in df.columns if ' price' in col and 'compare' not in col]
     
     logger.info(f"Processing {len(df)} variants, {len(price_cols)} countries")
     
     if remove_promos:
         # Supprimer les promos
         for price_col in price_cols:
-            country = price_col.replace(' price', '')
-            compare_col = f"{country} compare-at price"
+            country, _ = extract_country_from_column(price_col, csv_format)
+            if csv_format == 'matrixify':
+                compare_col = f"Compare At Price / {country}"
+            else:
+                compare_col = f"{country} compare-at price"
             
             for idx in df.index:
                 compare_at = df.at[idx, compare_col] if compare_col in df.columns else None
@@ -154,8 +201,11 @@ def process_csv(
             reduction_factor = 1 - (discount_pct / 100)
             
             for price_col in price_cols:
-                country = price_col.replace(' price', '')
-                compare_col = f"{country} compare-at price"
+                country, _ = extract_country_from_column(price_col, csv_format)
+                if csv_format == 'matrixify':
+                    compare_col = f"Compare At Price / {country}"
+                else:
+                    compare_col = f"{country} compare-at price"
                 
                 current_price = df.at[idx, price_col]
                 
@@ -176,8 +226,12 @@ def process_csv(
         compare_at_factor = 1 + (compare_at_pct / 100)
         
         for price_col in price_cols:
-            country = price_col.replace(' price', '')
-            compare_col = f"{country} compare-at price"
+            country, _ = extract_country_from_column(price_col, csv_format)
+            if csv_format == 'matrixify':
+                compare_col = f"Compare At Price / {country}"
+            else:
+                compare_col = f"{country} compare-at price"
+            
             round_func = get_rounding_function(country)
             
             for idx in df.index:
@@ -197,6 +251,44 @@ def process_csv(
     return df
 
 
+def convert_to_matrixify_format(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convertit un CSV au format Ablestar vers le format Matrixify
+    Input:  Variant ID, France price, France compare-at price, ...
+    Output: Variant ID, Price / France, Compare At Price / France, ...
+    """
+    csv_format = detect_csv_format(df)
+    
+    if csv_format == 'matrixify':
+        # Déjà au bon format, juste supprimer les colonnes Price et Compare At Price de base si présentes
+        cols_to_drop = []
+        if 'Price' in df.columns:
+            cols_to_drop.append('Price')
+        if 'Compare At Price' in df.columns:
+            cols_to_drop.append('Compare At Price')
+        if cols_to_drop:
+            df = df.drop(columns=cols_to_drop)
+        return df
+    
+    # Convertir depuis le format Ablestar
+    new_data = {}
+    
+    for col in df.columns:
+        if col == 'Variant ID':
+            new_data['Variant ID'] = df[col]
+        elif col in ['Price', 'Compare-at Price']:
+            # Ignorer les colonnes du marché de base
+            pass
+        elif ' compare-at price' in col:
+            country = col.replace(' compare-at price', '')
+            new_data[f'Compare At Price / {country}'] = df[col]
+        elif ' price' in col:
+            country = col.replace(' price', '')
+            new_data[f'Price / {country}'] = df[col]
+    
+    return pd.DataFrame(new_data)
+
+
 @router.post("/analyze")
 async def analyze_csv(file: UploadFile = File(...)):
     """
@@ -206,12 +298,15 @@ async def analyze_csv(file: UploadFile = File(...)):
         contents = await file.read()
         df = pd.read_csv(io.BytesIO(contents))
         
-        # Trouver les pays
-        price_cols = [col for col in df.columns if ' price' in col and 'compare' not in col]
-        countries = [col.replace(' price', '') for col in price_cols]
+        csv_format = detect_csv_format(df)
         
-        # NE PAS renvoyer de sample pour éviter les problèmes de NaN
-        # Le sample n'est pas utilisé dans le frontend de toute façon
+        # Trouver les pays selon le format
+        if csv_format == 'matrixify':
+            price_cols = [col for col in df.columns if col.startswith('Price / ')]
+            countries = [col.replace('Price / ', '') for col in price_cols]
+        else:
+            price_cols = [col for col in df.columns if ' price' in col and 'compare' not in col]
+            countries = [col.replace(' price', '') for col in price_cols]
         
         return {
             "success": True,
@@ -219,7 +314,8 @@ async def analyze_csv(file: UploadFile = File(...)):
             "variants_count": len(df),
             "countries_count": len(countries),
             "countries": countries,
-            "columns": list(df.columns)[:20]
+            "columns": list(df.columns)[:20],
+            "detected_format": csv_format
         }
     except Exception as e:
         logger.error(f"CSV analysis error: {e}")
@@ -240,7 +336,7 @@ async def process_csv_endpoint(
     remove_promos: bool = Form(False)
 ):
     """
-    Traite le CSV et retourne le fichier modifié
+    Traite le CSV et retourne le fichier modifié au format Matrixify
     """
     try:
         contents = await file.read()
@@ -248,7 +344,7 @@ async def process_csv_endpoint(
         
         logger.info(f"Processing CSV: {len(df)} rows, adjustment={adjustment}%, compare_at={compare_at}%")
         
-        # Traiter
+        # Traiter les modifications
         df_modified = process_csv(
             df,
             adjustment_pct=adjustment,
@@ -260,9 +356,12 @@ async def process_csv_endpoint(
             remove_promos=remove_promos
         )
         
+        # Convertir au format Matrixify pour l'export
+        df_matrixify = convert_to_matrixify_format(df_modified)
+        
         # Générer le CSV de sortie
         output = io.StringIO()
-        df_modified.to_csv(output, index=False)
+        df_matrixify.to_csv(output, index=False)
         output.seek(0)
         
         # Nom du fichier de sortie
@@ -276,7 +375,7 @@ async def process_csv_endpoint(
             suffix = "_modified"
         
         original_name = file.filename.replace('.csv', '')
-        output_filename = f"{original_name}{suffix}.csv"
+        output_filename = f"{original_name}{suffix}_MATRIXIFY.csv"
         
         return StreamingResponse(
             io.BytesIO(output.getvalue().encode('utf-8')),
@@ -299,11 +398,14 @@ async def csv_info():
     return {
         "module": "CSV Price Modifier",
         "supported_countries": len(COUNTRY_ROUNDING),
+        "output_format": "Matrixify compatible",
         "features": [
             "Ajustement global (+/- %)",
             "Compare-at automatique",
             "Promos aléatoires",
             "Suppression des promos",
-            "Terminaisons psychologiques par pays"
+            "Terminaisons psychologiques par pays",
+            "Auto-détection format (Ablestar/Matrixify)",
+            "Export format Matrixify"
         ]
     }
