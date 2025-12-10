@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Routers
 from app.routers import pricing, products, markets
 from app.routers.cache import router as cache_router
+from app.routers.csv_processor import router as csv_router
 
 # Services
 from app.services.shopify import ShopifyService
@@ -75,6 +76,7 @@ app.include_router(pricing.router, prefix="/api/pricing")
 app.include_router(products.router, prefix="/api/products")
 app.include_router(markets.router, prefix="/api/markets")
 app.include_router(cache_router)  # cache_router a déjà le préfixe /api/cache
+app.include_router(csv_router)    # csv_router a déjà le préfixe /api/csv
 
 
 @app.get("/")
