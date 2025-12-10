@@ -4,7 +4,8 @@ import {
   Package, 
   Settings, 
   ChevronRight,
-  Sparkles
+  Sparkles,
+  FileSpreadsheet
 } from 'lucide-react'
 
 const menuItems = [
@@ -13,6 +14,13 @@ const menuItems = [
     label: 'Modification de Prix',
     icon: Tag,
     active: true
+  },
+  {
+    id: 'csv',
+    label: 'Import/Export CSV',
+    icon: FileSpreadsheet,
+    active: true,
+    isNew: true
   },
   // Futurs modules (désactivés pour l'instant)
   {
@@ -95,6 +103,12 @@ function Sidebar({ activeModule, onModuleChange }) {
                   {item.soon && (
                     <span className="text-[10px] uppercase bg-white/10 px-2 py-0.5 rounded-full">
                       Soon
+                    </span>
+                  )}
+                  
+                  {item.isNew && (
+                    <span className="text-[10px] uppercase bg-green-500 text-white px-2 py-0.5 rounded-full">
+                      New
                     </span>
                   )}
                   
