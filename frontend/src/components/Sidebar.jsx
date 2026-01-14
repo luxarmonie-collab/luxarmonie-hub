@@ -5,7 +5,8 @@ import {
   Settings, 
   ChevronRight,
   Sparkles,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Wrench
 } from 'lucide-react'
 
 const menuItems = [
@@ -16,11 +17,17 @@ const menuItems = [
     active: true
   },
   {
+    id: 'fix-price',
+    label: 'Correction de Prix',
+    icon: Wrench,
+    active: true,
+    isNew: true
+  },
+  {
     id: 'csv',
     label: 'Import/Export CSV',
     icon: FileSpreadsheet,
-    active: true,
-    isNew: true
+    active: true
   },
   // Futurs modules (désactivés pour l'instant)
   {
