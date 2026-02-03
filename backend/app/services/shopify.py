@@ -131,36 +131,55 @@ class ShopifyService:
             try:
                 result = await self.execute_query(query, variables)
 
-                if "data" in result and "markets" in result["data"]:
-                    edges = result["data"]["markets"]["edges"]
+                if result and "data" in result and result["data"] and "markets" in result["data"]:
+                    markets_data = result["data"]["markets"]
+                    if not markets_data:
+                        logger.warning("markets is None in response")
+                        has_next = False
+                        continue
+
+                    edges = markets_data.get("edges") or []
                     logger.info(f"Found {len(edges)} markets in this batch")
 
                     for edge in edges:
-                        market = edge["node"]
-                        market["numericId"] = market["id"].split("/")[-1]
+                        if not edge:
+                            continue
+
+                        market = edge.get("node")
+                        if not market:
+                            continue
+
+                        market["numericId"] = market.get("id", "").split("/")[-1]
 
                         # Extraire la PriceList du premier Catalog qui en a une
                         price_list = None
-                        catalogs = market.get("catalogs", {}).get("edges", [])
-                        for catalog_edge in catalogs:
-                            catalog = catalog_edge.get("node", {})
-                            if catalog.get("priceList"):
-                                price_list = catalog["priceList"]
-                                break
+                        catalogs_data = market.get("catalogs")
+                        if catalogs_data:
+                            catalog_edges = catalogs_data.get("edges") or []
+                            for catalog_edge in catalog_edges:
+                                if not catalog_edge:
+                                    continue
+                                catalog = catalog_edge.get("node")
+                                if catalog and catalog.get("priceList"):
+                                    price_list = catalog["priceList"]
+                                    break
 
                         # Ajouter priceList au market pour compatibilité
                         market["priceList"] = price_list
 
                         all_markets.append(market)
-                        cursor = edge["cursor"]
+                        cursor = edge.get("cursor")
 
-                    has_next = result["data"]["markets"]["pageInfo"]["hasNextPage"]
+                    page_info = markets_data.get("pageInfo")
+                    has_next = page_info.get("hasNextPage", False) if page_info else False
                 else:
                     logger.warning(f"No data in result: {result}")
                     has_next = False
 
             except Exception as e:
                 logger.error(f"Failed to get markets: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 has_next = False
 
         logger.info(f"Total markets found: {len(all_markets)}")
@@ -178,7 +197,9 @@ class ShopifyService:
 
         for m in all_markets:
             pl = m.get("priceList")
-            logger.info(f"  - {m['name']}: priceList={pl['id'] if pl else 'None'}")
+            market_name = m.get("name", "Unknown")
+            pl_id = pl.get("id") if pl else "None"
+            logger.info(f"  - {market_name}: priceList={pl_id}")
 
         return all_markets
 
@@ -221,27 +242,39 @@ class ShopifyService:
             try:
                 result = await self.execute_query(query, variables)
 
-                if "data" in result and "priceLists" in result["data"]:
-                    edges = result["data"]["priceLists"]["edges"]
+                if result and "data" in result and result["data"] and "priceLists" in result["data"]:
+                    pricelists_data = result["data"]["priceLists"]
+                    if not pricelists_data:
+                        has_next = False
+                        continue
+
+                    edges = pricelists_data.get("edges") or []
                     logger.info(f"Found {len(edges)} priceLists in this batch")
 
                     for edge in edges:
-                        pl = edge["node"]
-                        all_pricelists.append(pl)
-                        cursor = edge["cursor"]
+                        if not edge:
+                            continue
+                        pl = edge.get("node")
+                        if pl:
+                            all_pricelists.append(pl)
+                        cursor = edge.get("cursor")
 
-                    has_next = result["data"]["priceLists"]["pageInfo"]["hasNextPage"]
+                    page_info = pricelists_data.get("pageInfo")
+                    has_next = page_info.get("hasNextPage", False) if page_info else False
                 else:
                     logger.warning(f"No priceLists data in result: {result}")
                     has_next = False
 
             except Exception as e:
                 logger.error(f"Failed to get priceLists: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 has_next = False
 
         logger.info(f"Total PriceLists found: {len(all_pricelists)}")
         for pl in all_pricelists:
-            logger.info(f"  PriceList: {pl['name']} ({pl['currency']}) - catalog: {pl.get('catalog', {}).get('title', 'N/A')}")
+            catalog = pl.get("catalog") or {}
+            logger.info(f"  PriceList: {pl.get('name', 'N/A')} ({pl.get('currency', 'N/A')}) - catalog: {catalog.get('title', 'N/A')}")
 
         # Associer les PriceLists aux marchés par nom
         # Convention: PriceList name contient souvent le nom du marché ou "International" etc.
