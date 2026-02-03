@@ -17,7 +17,7 @@ class ShopifyService:
     """Service de connexion à Shopify via GraphQL Admin API"""
     
     def __init__(self):
-        self.api_version = "2025-01"
+        self.api_version = "2024-10"
     
     @property
     def shop_domain(self) -> str:
@@ -76,7 +76,7 @@ class ShopifyService:
     async def get_all_markets(self) -> List[Dict]:
         """
         Récupère TOUS les marchés Shopify avec leurs PriceLists.
-        API 2025: priceList via catalogs, status au lieu de enabled.
+        Requête hybride: priceList direct + catalogs pour compatibilité.
         """
         query = """
         query GetMarkets($first: Int!, $after: String) {
@@ -86,11 +86,17 @@ class ShopifyService:
                         id
                         name
                         handle
-                        status
+                        enabled
+                        primary
                         currencySettings {
                             baseCurrency {
                                 currencyCode
                             }
+                        }
+                        priceList {
+                            id
+                            name
+                            currency
                         }
                         catalogs(first: 1) {
                             edges {
@@ -143,17 +149,19 @@ class ShopifyService:
                         if not market:
                             continue
 
-                        market["numericId"] = market.get("id", "").split("/")[-1]
+                        market["numericId"] = market["id"].split("/")[-1]
 
-                        # Extraire priceList depuis catalogs (nouveau modèle Shopify 2025)
+                        # Priorité: catalogs (nouveau modèle), sinon priceList direct (ancien modèle)
                         catalogs = market.get("catalogs", {}).get("edges", [])
-                        if catalogs:
-                            market["priceList"] = catalogs[0]["node"].get("priceList")
-                        else:
-                            market["priceList"] = None
+                        if catalogs and catalogs[0]["node"].get("priceList"):
+                            market["priceList"] = catalogs[0]["node"]["priceList"]
+                        # sinon garder market["priceList"] tel quel (ancien champ)
+
+                        # Nettoyer le champ catalogs pour pas polluer la suite
+                        market.pop("catalogs", None)
 
                         all_markets.append(market)
-                        cursor = edge.get("cursor")
+                        cursor = edge["cursor"]
 
                     page_info = markets_data.get("pageInfo")
                     has_next = page_info.get("hasNextPage", False) if page_info else False

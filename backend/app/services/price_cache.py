@@ -378,8 +378,8 @@ class PriceCache:
                     "priceListId": None,
                     "hasPriceList": False,
                     "usesBasePrices": True,
-                    "primary": False,  # primary est déprécié
-                    "enabled": market.get("status") == "ACTIVE",  # status remplace enabled
+                    "primary": market.get("primary", False),
+                    "enabled": market.get("enabled", True),
                     "prices": {}  # Pas de prix spécifiques - utilise les prix de base
                 }
 
