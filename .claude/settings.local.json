@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nFix critical data loading bug + add coherence analysis module\n\nBug fixes:\n- Add missing format_price_for_country function in pricing.py\n- Fix cache path to be cross-platform \\(Windows/Linux\\)\n- Add validation to prevent loading/saving empty caches\n- Improve error handling when Shopify API fails\n- Fix missing get_catalog_price_list function in markets.py\n- Display cache errors in frontend\n\nNew features:\n- Cross-market price coherence analysis module\n- Automatic price corrector with one-click apply\n- Improved product selector in FixPriceModule \\(select all variants\\)\n- Group selected variants by product\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push)",
+      "Bash(git remote set-url:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nFix Shopify API: fetch PriceLists via Catalogs \\(2024 model\\)\n\n- Update GraphQL query to fetch markets with their catalogs\n- Extract PriceList from MarketCatalog or CompanyLocationCatalog\n- Add fallback: fetch all PriceLists directly and match to markets\n- Add detailed logging for debugging market/pricelist associations\n\nShopify changed the model: Market → Catalogs → PriceList\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}

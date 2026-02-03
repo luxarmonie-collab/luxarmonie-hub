@@ -54,8 +54,8 @@ async def get_markets():
                 "numericId": market["numericId"],
                 "name": market_name,
                 "handle": market.get("handle"),
-                "enabled": market.get("enabled", True),
-                "primary": market.get("primary", False),
+                "enabled": market.get("status") == "ACTIVE",  # status remplace enabled
+                "primary": False,  # primary est déprécié
                 "shopifyCurrency": market.get("currencySettings", {}).get("baseCurrency", {}).get("currencyCode"),
                 "config": {
                     "currency": config["currency"] if config else None,

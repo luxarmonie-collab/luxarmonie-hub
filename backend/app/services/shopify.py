@@ -17,7 +17,7 @@ class ShopifyService:
     """Service de connexion à Shopify via GraphQL Admin API"""
     
     def __init__(self):
-        self.api_version = "2024-10"
+        self.api_version = "2025-01"
     
     @property
     def shop_domain(self) -> str:
@@ -76,7 +76,7 @@ class ShopifyService:
     async def get_all_markets(self) -> List[Dict]:
         """
         Récupère TOUS les marchés Shopify avec leurs PriceLists.
-        Requête SIMPLE: market → priceList directement (pas de Catalogs).
+        API 2025: priceList via catalogs, status au lieu de enabled.
         """
         query = """
         query GetMarkets($first: Int!, $after: String) {
@@ -86,17 +86,22 @@ class ShopifyService:
                         id
                         name
                         handle
-                        enabled
-                        primary
+                        status
                         currencySettings {
                             baseCurrency {
                                 currencyCode
                             }
                         }
-                        priceList {
-                            id
-                            name
-                            currency
+                        catalogs(first: 1) {
+                            edges {
+                                node {
+                                    priceList {
+                                        id
+                                        name
+                                        currency
+                                    }
+                                }
+                            }
                         }
                     }
                     cursor
@@ -139,7 +144,13 @@ class ShopifyService:
                             continue
 
                         market["numericId"] = market.get("id", "").split("/")[-1]
-                        # priceList est déjà directement sur le market (pas besoin de parsing)
+
+                        # Extraire priceList depuis catalogs (nouveau modèle Shopify 2025)
+                        catalogs = market.get("catalogs", {}).get("edges", [])
+                        if catalogs:
+                            market["priceList"] = catalogs[0]["node"].get("priceList")
+                        else:
+                            market["priceList"] = None
 
                         all_markets.append(market)
                         cursor = edge.get("cursor")
