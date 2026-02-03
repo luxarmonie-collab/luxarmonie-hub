@@ -6,15 +6,53 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from typing import Dict, List, Optional
 from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Chemin du fichier cache (utiliser un volume persistant sur Railway)
-CACHE_DIR = os.environ.get("CACHE_DIR", "/app/cache")
+
+def get_cache_dir() -> str:
+    """
+    Retourne le chemin du cache de manière cross-platform.
+    Priorité: CACHE_DIR env > /app/cache (Linux/Railway) > user temp dir
+    """
+    # 1. Variable d'environnement explicite
+    if os.environ.get("CACHE_DIR"):
+        return os.environ.get("CACHE_DIR")
+
+    # 2. Sur Linux/Railway, utiliser /app/cache si possible
+    if sys.platform != "win32":
+        linux_cache = "/app/cache"
+        try:
+            os.makedirs(linux_cache, exist_ok=True)
+            # Test d'écriture
+            test_file = os.path.join(linux_cache, ".write_test")
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+            return linux_cache
+        except (OSError, IOError):
+            pass
+
+    # 3. Fallback: dossier dans le répertoire courant ou temp
+    fallback_dir = os.path.join(os.path.dirname(__file__), "..", "..", "cache")
+    fallback_dir = os.path.abspath(fallback_dir)
+
+    try:
+        os.makedirs(fallback_dir, exist_ok=True)
+        return fallback_dir
+    except (OSError, IOError):
+        # Dernier recours: temp dir
+        import tempfile
+        return tempfile.gettempdir()
+
+
+CACHE_DIR = get_cache_dir()
 CACHE_FILE = os.path.join(CACHE_DIR, "price_cache.json")
+logger.info(f"Cache directory: {CACHE_DIR}")
 
 
 class PriceCache:
@@ -46,9 +84,10 @@ class PriceCache:
             "current_market": "",
             "markets_done": 0,
             "total_markets": 0,
-            "total_prices": 0
+            "total_prices": 0,
+            "error": None
         }
-        
+
         # Essayer de charger depuis le fichier au démarrage
         self._load_from_file()
     
@@ -59,19 +98,34 @@ class PriceCache:
                 logger.info(f"Loading cache from file: {CACHE_FILE}")
                 with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                
-                self._cache = data.get("cache", {})
+
+                loaded_cache = data.get("cache", {})
+                total_prices = sum(len(m.get("prices", {})) for m in loaded_cache.values())
+
+                # VALIDATION: Ne pas charger un cache vide
+                if len(loaded_cache) == 0 or total_prices == 0:
+                    logger.warning(f"Cache file exists but is empty ({len(loaded_cache)} markets, {total_prices} prices). Skipping load.")
+                    return False
+
+                self._cache = loaded_cache
                 self._last_refresh = datetime.fromisoformat(data["last_refresh"]) if data.get("last_refresh") else None
                 self._loaded = True
-                
-                total_prices = sum(len(m.get("prices", {})) for m in self._cache.values())
+
                 logger.info(f"Cache loaded from file: {len(self._cache)} markets, {total_prices} prices")
                 logger.info(f"Last refresh: {self._last_refresh}")
-                
+
                 return True
+        except json.JSONDecodeError as e:
+            logger.error(f"Cache file is corrupted (JSON error): {e}")
+            # Supprimer le fichier corrompu
+            try:
+                os.remove(CACHE_FILE)
+                logger.info(f"Removed corrupted cache file")
+            except OSError:
+                pass
         except Exception as e:
             logger.warning(f"Could not load cache from file: {e}")
-        
+
         return False
     
     def _save_to_file(self) -> bool:
@@ -120,7 +174,7 @@ class PriceCache:
     def get_status(self) -> dict:
         """Retourne le statut du cache"""
         total_prices = sum(
-            len(market_data.get("prices", {})) 
+            len(market_data.get("prices", {}))
             for market_data in self._cache.values()
         )
         return {
@@ -130,7 +184,9 @@ class PriceCache:
             "markets_count": len(self._cache),
             "total_prices": total_prices,
             "progress": self._load_progress,
-            "persisted": os.path.exists(CACHE_FILE)
+            "persisted": os.path.exists(CACHE_FILE),
+            "cache_dir": CACHE_DIR,
+            "error": self._load_progress.get("error")
         }
     
     def get_price(self, market_name: str, variant_id: str) -> Optional[dict]:
@@ -208,24 +264,41 @@ class PriceCache:
         if self._loading:
             logger.warning("Price cache is already loading")
             return False
-        
+
         self._loading = True
         self._load_progress = {
             "current_market": "Initialisation...",
             "markets_done": 0,
             "total_markets": 0,
-            "total_prices": 0
+            "total_prices": 0,
+            "error": None
         }
-        
+
         try:
             logger.info("=== STARTING PRICE CACHE LOAD ===")
-            
+
             # Récupérer tous les marchés
-            markets = await shopify_service.get_all_markets()
+            try:
+                markets = await shopify_service.get_all_markets()
+            except Exception as e:
+                logger.error(f"Failed to fetch markets from Shopify: {e}")
+                self._load_progress["error"] = f"Erreur Shopify: {str(e)}"
+                return False
+
+            if not markets:
+                logger.error("No markets returned from Shopify. Check API credentials.")
+                self._load_progress["error"] = "Aucun marché retourné par Shopify. Vérifiez les credentials."
+                return False
+
             markets_with_pricelist = [m for m in markets if m.get("priceList")]
-            
+
+            if not markets_with_pricelist:
+                logger.error(f"No markets have PriceLists configured. Total markets: {len(markets)}")
+                self._load_progress["error"] = f"Aucun marché n'a de PriceList configurée ({len(markets)} marchés trouvés)."
+                return False
+
             self._load_progress["total_markets"] = len(markets_with_pricelist)
-            logger.info(f"Found {len(markets_with_pricelist)} markets with PriceLists")
+            logger.info(f"Found {len(markets_with_pricelist)} markets with PriceLists out of {len(markets)} total")
             
             new_cache = {}
             
@@ -267,19 +340,27 @@ class PriceCache:
                 except Exception as e:
                     logger.error(f"Error loading prices for {market_name}: {e}")
             
+            # VALIDATION: Ne pas sauvegarder un cache vide
+            total_prices = sum(len(m.get("prices", {})) for m in new_cache.values())
+
+            if len(new_cache) == 0 or total_prices == 0:
+                logger.error(f"Cache load resulted in empty data ({len(new_cache)} markets, {total_prices} prices). Not saving.")
+                self._load_progress["error"] = "Le chargement a retourné 0 prix. Vérifiez les PriceLists Shopify."
+                return False
+
             # Remplacer le cache
             self._cache = new_cache
             self._loaded = True
             self._last_refresh = datetime.now()
             self._load_progress["current_market"] = "Terminé"
             self._load_progress["markets_done"] = len(markets_with_pricelist)
-            
-            total_prices = sum(len(m.get("prices", {})) for m in self._cache.values())
+            self._load_progress["error"] = None
+
             logger.info(f"=== PRICE CACHE LOADED: {len(self._cache)} markets, {total_prices} prices ===")
-            
+
             # SAUVEGARDER DANS LE FICHIER
             self._save_to_file()
-            
+
             return True
             
         except Exception as e:

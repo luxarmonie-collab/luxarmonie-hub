@@ -84,16 +84,33 @@ function FixPriceModule() {
       variantTitle: variant.title,
       productTitle: product.title,
       productId: product.id,
-      currentPrice: variant.price
+      currentPrice: variant.price,
+      sku: variant.sku
     }
-    
+
     // Vérifier si déjà sélectionné
     if (!selectedVariants.find(v => v.variantId === variant.id)) {
       setSelectedVariants([...selectedVariants, variantData])
     }
-    
-    setProductSearch('')
-    setProducts([])
+  }
+
+  const handleSelectAllVariantsForFix = (product) => {
+    const newVariants = product.variants
+      .filter(v => !selectedVariants.find(sv => sv.variantId === v.id))
+      .map(variant => ({
+        variantId: variant.id,
+        variantTitle: variant.title,
+        productTitle: product.title,
+        productId: product.id,
+        currentPrice: variant.price,
+        sku: variant.sku
+      }))
+
+    setSelectedVariants([...selectedVariants, ...newVariants])
+  }
+
+  const handleDeselectAllVariantsForProduct = (productId) => {
+    setSelectedVariants(selectedVariants.filter(v => v.productId !== productId))
   }
   
   const handleRemoveVariantFromFix = (variantId) => {
@@ -364,33 +381,54 @@ function FixPriceModule() {
 
             {/* Résultats de recherche */}
             {products.length > 0 && (
-              <div className="mt-2 border border-gray-200 rounded-lg max-h-64 overflow-y-auto">
+              <div className="mt-2 border border-gray-200 rounded-lg max-h-80 overflow-y-auto">
                 {products.map(product => (
                   <div key={product.id} className="border-b border-gray-100 last:border-b-0">
-                    <button
-                      onClick={() => toggleProductExpand(product.id)}
-                      className="w-full px-4 py-2 flex items-center justify-between hover:bg-gray-50"
-                    >
-                      <span className="font-medium text-sm">{product.title}</span>
-                      {expandedProducts[product.id] ? (
-                        <ChevronDown className="w-4 h-4 text-gray-400" />
-                      ) : (
-                        <ChevronRight className="w-4 h-4 text-gray-400" />
-                      )}
-                    </button>
-                    
+                    <div className="flex items-center justify-between px-4 py-2 hover:bg-gray-50">
+                      <button
+                        onClick={() => toggleProductExpand(product.id)}
+                        className="flex items-center gap-2 flex-1 text-left"
+                      >
+                        {expandedProducts[product.id] ? (
+                          <ChevronDown className="w-4 h-4 text-gray-400" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 text-gray-400" />
+                        )}
+                        <span className="font-medium text-sm">{product.title}</span>
+                        <span className="text-xs text-gray-400">({product.variants?.length} variantes)</span>
+                      </button>
+                      <button
+                        onClick={() => handleSelectAllVariantsForFix(product)}
+                        className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                      >
+                        + Tout sélectionner
+                      </button>
+                    </div>
+
                     {expandedProducts[product.id] && (
                       <div className="bg-gray-50 px-4 py-2">
-                        {product.variants?.map(variant => (
-                          <button
-                            key={variant.id}
-                            onClick={() => handleSelectVariantForFix(product, variant)}
-                            className="w-full text-left px-3 py-1.5 text-sm hover:bg-blue-100 rounded flex justify-between items-center"
-                          >
-                            <span>{variant.title}</span>
-                            <span className="text-gray-500">{variant.price} €</span>
-                          </button>
-                        ))}
+                        {product.variants?.map(variant => {
+                          const isSelected = selectedVariants.find(v => v.variantId === variant.id)
+                          return (
+                            <button
+                              key={variant.id}
+                              onClick={() => handleSelectVariantForFix(product, variant)}
+                              disabled={isSelected}
+                              className={`w-full text-left px-3 py-1.5 text-sm rounded flex justify-between items-center ${
+                                isSelected
+                                  ? 'bg-blue-100 text-blue-700 cursor-default'
+                                  : 'hover:bg-blue-100'
+                              }`}
+                            >
+                              <span className="flex items-center gap-2">
+                                {isSelected && <Check className="w-3 h-3" />}
+                                {variant.title}
+                                {variant.sku && <span className="text-xs text-gray-400">({variant.sku})</span>}
+                              </span>
+                              <span className="text-gray-500">{variant.price} €</span>
+                            </button>
+                          )
+                        })}
                       </div>
                     )}
                   </div>
@@ -398,19 +436,43 @@ function FixPriceModule() {
               </div>
             )}
 
-            {/* Variantes sélectionnées */}
+            {/* Variantes sélectionnées - Groupées par produit */}
             {selectedVariants.length > 0 && (
               <div className="mt-4">
                 <h4 className="text-sm font-medium text-gray-700 mb-2">
                   Variantes sélectionnées ({selectedVariants.length})
                 </h4>
-                <div className="flex flex-wrap gap-2">
-                  {selectedVariants.map(v => (
-                    <div key={v.variantId} className="flex items-center gap-2 bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm">
-                      <span className="truncate max-w-[200px]">{v.productTitle} - {v.variantTitle}</span>
-                      <button onClick={() => handleRemoveVariantFromFix(v.variantId)}>
-                        <X className="w-4 h-4" />
-                      </button>
+                <div className="space-y-2">
+                  {/* Grouper par produit */}
+                  {Object.entries(
+                    selectedVariants.reduce((acc, v) => {
+                      if (!acc[v.productId]) {
+                        acc[v.productId] = { title: v.productTitle, variants: [] }
+                      }
+                      acc[v.productId].variants.push(v)
+                      return acc
+                    }, {})
+                  ).map(([productId, { title, variants }]) => (
+                    <div key={productId} className="bg-blue-50 rounded-lg p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-medium text-sm text-blue-900">{title}</span>
+                        <button
+                          onClick={() => handleDeselectAllVariantsForProduct(productId)}
+                          className="text-xs text-red-600 hover:text-red-800"
+                        >
+                          Tout retirer
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {variants.map(v => (
+                          <div key={v.variantId} className="flex items-center gap-1 bg-blue-100 text-blue-800 px-2 py-0.5 rounded text-xs">
+                            <span>{v.variantTitle}</span>
+                            <button onClick={() => handleRemoveVariantFromFix(v.variantId)} className="hover:text-red-600">
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   ))}
                 </div>

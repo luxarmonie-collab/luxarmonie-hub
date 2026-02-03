@@ -1,12 +1,13 @@
-import { 
-  Tag, 
-  LayoutDashboard, 
-  Package, 
-  Settings, 
+import {
+  Tag,
+  LayoutDashboard,
+  Package,
+  Settings,
   ChevronRight,
   Sparkles,
   FileSpreadsheet,
-  Wrench
+  Wrench,
+  BarChart3
 } from 'lucide-react'
 
 const menuItems = [
@@ -20,6 +21,12 @@ const menuItems = [
     id: 'fix-price',
     label: 'Correction de Prix',
     icon: Wrench,
+    active: true
+  },
+  {
+    id: 'coherence',
+    label: 'Analyse Cohérence',
+    icon: BarChart3,
     active: true,
     isNew: true
   },

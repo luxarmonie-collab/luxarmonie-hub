@@ -82,28 +82,37 @@ function CacheStatus({ onCacheLoaded }) {
 
   const isLoading = status.loading
   const isLoaded = status.loaded
+  const hasError = status.error || status.progress?.error
 
   return (
     <div className={`border rounded-lg p-4 mb-6 ${
-      isLoaded ? 'bg-green-50 border-green-200' : 
-      isLoading ? 'bg-yellow-50 border-yellow-200' : 
+      hasError ? 'bg-red-50 border-red-200' :
+      isLoaded ? 'bg-green-50 border-green-200' :
+      isLoading ? 'bg-yellow-50 border-yellow-200' :
       'bg-gray-50 border-gray-200'
     }`}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <ServerCog className={`w-5 h-5 ${
-            isLoaded ? 'text-green-600' : 
-            isLoading ? 'text-yellow-600' : 
+            hasError ? 'text-red-600' :
+            isLoaded ? 'text-green-600' :
+            isLoading ? 'text-yellow-600' :
             'text-gray-400'
           }`} />
           <div>
             <div className="font-medium text-gray-900">
-              {isLoaded ? '✅ Cache des prix chargé' : 
-               isLoading ? '⏳ Chargement du cache en cours...' : 
+              {hasError ? '❌ Erreur de chargement' :
+               isLoaded ? '✅ Cache des prix chargé' :
+               isLoading ? '⏳ Chargement du cache en cours...' :
                '⚠️ Cache non chargé'}
             </div>
             <div className="text-sm text-gray-500">
-              {isLoaded && (
+              {hasError && (
+                <span className="text-red-600">
+                  {status.error || status.progress?.error}
+                </span>
+              )}
+              {!hasError && isLoaded && (
                 <>
                   {status.markets_count} marchés • {status.total_prices?.toLocaleString()} prix
                   {status.last_refresh && (
@@ -113,13 +122,13 @@ function CacheStatus({ onCacheLoaded }) {
                   )}
                 </>
               )}
-              {isLoading && status.progress && (
+              {!hasError && isLoading && status.progress && (
                 <>
                   {status.progress.current_market} ({status.progress.markets_done}/{status.progress.total_markets})
                   • {status.progress.total_prices?.toLocaleString()} prix chargés
                 </>
               )}
-              {!isLoaded && !isLoading && (
+              {!hasError && !isLoaded && !isLoading && (
                 <span>Cliquez sur Rafraîchir pour charger les prix actuels</span>
               )}
             </div>

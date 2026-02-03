@@ -105,26 +105,26 @@ async def get_market_details(market_name: str):
         # Récupérer depuis Shopify
         markets = await shopify_service.get_all_markets()
         market = next((m for m in markets if m["name"] == market_name), None)
-        
+
         if not market:
             raise HTTPException(status_code=404, detail=f"Market '{market_name}' not found")
-        
+
         # Config Luxarmonie
         config = COUNTRIES.get(market_name)
-        
-        # Price list
-        price_list = await shopify_service.get_catalog_price_list(market["id"])
-        
+
+        # Price list - utiliser la priceList déjà présente dans le market
+        price_list = market.get("priceList")
+
         return {
             "market": market,
             "config": config,
             "priceList": {
                 "id": price_list["id"] if price_list else None,
                 "currency": price_list["currency"] if price_list else None,
-                "pricesCount": len(price_list["prices"]["edges"]) if price_list else 0
+                "name": price_list.get("name") if price_list else None
             } if price_list else None
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:

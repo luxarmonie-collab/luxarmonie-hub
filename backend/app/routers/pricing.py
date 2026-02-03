@@ -114,6 +114,23 @@ def round_kr(price: float) -> float:
     return float(round(price / 5) * 5)
 
 
+def format_price_for_country(price: float, country: str) -> str:
+    """
+    Formate un prix selon les conventions du pays.
+    Retourne une string avec le bon nombre de décimales.
+    """
+    config = COUNTRIES.get(country, {})
+    currency = config.get("currency", "EUR")
+
+    # Devises sans centimes
+    no_decimal_currencies = ["HUF", "CLP", "COP", "PYG", "KRW", "JPY", "VND"]
+
+    if currency in no_decimal_currencies:
+        return f"{int(round(price))}"
+    else:
+        return f"{price:.2f}"
+
+
 # Mapping des pays vers leur fonction de terminaison
 COUNTRY_ROUNDING = {
     # .99
@@ -269,10 +286,12 @@ async def get_pricing_config():
     Utilise le cache si chargé, sinon Shopify, sinon config statique
     """
     from app.services.price_cache import price_cache
-    
-    # 1. Si le cache est chargé, utiliser les marchés du cache
-    if price_cache.is_loaded:
-        print("CONFIG: Using cache for markets list")
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # 1. Si le cache est chargé ET contient des données, utiliser les marchés du cache
+    if price_cache.is_loaded and len(price_cache._cache) > 0:
+        logger.info(f"CONFIG: Using cache ({len(price_cache._cache)} markets)")
         countries = []
         for market_name, market_data in price_cache._cache.items():
             currency = market_data.get("currency", "EUR")
@@ -288,50 +307,60 @@ async def get_pricing_config():
             })
         countries.sort(key=lambda x: x["name"])
         return {"countries": countries, "source": "cache"}
-    
+
     # 2. Toujours essayer Shopify (même pendant le chargement du cache)
-    print("CONFIG: Cache not loaded, fetching from Shopify...")
+    logger.info("CONFIG: Cache not ready, fetching from Shopify...")
+    shopify_error = None
     try:
         markets = await shopify_service.get_all_markets()
-        print(f"CONFIG: Got {len(markets)} markets from Shopify")
-        
-        countries = []
-        for market in markets:
-            market_name = market["name"]
-            price_list = market.get("priceList")
-            currency = price_list["currency"] if price_list else "EUR"
-            config = COUNTRIES.get(market_name, {})
-            countries.append({
-                "name": market_name,
-                "currency": currency,
-                "ending": config.get("ending", 0.99),
-                "vat": config.get("vat", 0),
-                "exchange_rate": config.get("exchange_rate", 1),
-                "adjustment": config.get("adjustment", "none")
-            })
-        countries.sort(key=lambda x: x["name"])
-        print(f"CONFIG: Returning {len(countries)} countries from Shopify")
-        return {"countries": countries, "source": "shopify"}
+
+        if markets and len(markets) > 0:
+            logger.info(f"CONFIG: Got {len(markets)} markets from Shopify")
+
+            countries = []
+            for market in markets:
+                market_name = market["name"]
+                price_list = market.get("priceList")
+                currency = price_list["currency"] if price_list else "EUR"
+                config = COUNTRIES.get(market_name, {})
+                countries.append({
+                    "name": market_name,
+                    "currency": currency,
+                    "ending": config.get("ending", 0.99),
+                    "vat": config.get("vat", 0),
+                    "exchange_rate": config.get("exchange_rate", 1),
+                    "adjustment": config.get("adjustment", "none")
+                })
+            countries.sort(key=lambda x: x["name"])
+            return {"countries": countries, "source": "shopify"}
+        else:
+            shopify_error = "Shopify returned 0 markets"
+            logger.warning(f"CONFIG: {shopify_error}")
     except Exception as e:
-        print(f"CONFIG ERROR: Failed to load from Shopify: {e}")
+        shopify_error = str(e)
+        logger.error(f"CONFIG ERROR: Failed to load from Shopify: {e}")
         import traceback
         traceback.print_exc()
-    
-    # 3. Fallback sur config statique (ne devrait jamais arriver)
-    print(f"CONFIG: Using static fallback with {len(COUNTRIES)} countries")
+
+    # 3. Fallback sur config statique
+    logger.warning(f"CONFIG: Using static fallback ({len(COUNTRIES)} countries)")
+    static_countries = [
+        {
+            "name": name,
+            "currency": config["currency"],
+            "ending": config["ending"],
+            "vat": config["vat"],
+            "exchange_rate": config["exchange_rate"],
+            "adjustment": config["adjustment"]
+        }
+        for name, config in COUNTRIES.items()
+    ]
+    static_countries.sort(key=lambda x: x["name"])
+
     return {
-        "countries": [
-            {
-                "name": name,
-                "currency": config["currency"],
-                "ending": config["ending"],
-                "vat": config["vat"],
-                "exchange_rate": config["exchange_rate"],
-                "adjustment": config["adjustment"]
-            }
-            for name, config in COUNTRIES.items()
-        ],
-        "source": "static"
+        "countries": static_countries,
+        "source": "static",
+        "warning": f"Données Shopify non disponibles ({shopify_error}). Utilisation de la config statique."
     }
 
 
@@ -997,6 +1026,312 @@ async def apply_random_promo(request: RandomPromoApplyRequest):
     
     except Exception as e:
         apply_progress["active"] = False
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========================================
+# ANALYSE DE COHÉRENCE CROSS-MARCHÉS
+# ========================================
+
+class CoherenceAnalysisRequest(BaseModel):
+    """Paramètres pour l'analyse de cohérence"""
+    tolerance_percent: float = 15.0  # Tolérance de variation acceptable (%)
+    reference_market: str = "France"  # Marché de référence pour les comparaisons
+
+
+@router.post("/coherence/analyze")
+async def analyze_price_coherence(request: CoherenceAnalysisRequest):
+    """
+    Analyse la cohérence des prix entre marchés.
+    Détecte les anomalies où un même produit/variante a des prix incohérents
+    par rapport au taux de change attendu.
+    """
+    from app.services.price_cache import price_cache
+    import logging
+    logger = logging.getLogger(__name__)
+
+    if not price_cache.is_loaded or len(price_cache._cache) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Le cache des prix n'est pas chargé. Rafraîchissez le cache d'abord."
+        )
+
+    reference_market = request.reference_market
+    if reference_market not in price_cache._cache:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Le marché de référence '{reference_market}' n'existe pas dans le cache."
+        )
+
+    logger.info(f"Analyzing price coherence with reference market: {reference_market}")
+
+    # Récupérer les prix du marché de référence
+    ref_market_data = price_cache._cache[reference_market]
+    ref_prices = ref_market_data.get("prices", {})
+    ref_currency = ref_market_data.get("currency", "EUR")
+
+    anomalies = []
+    stats = {
+        "total_variants_analyzed": len(ref_prices),
+        "total_comparisons": 0,
+        "anomalies_found": 0,
+        "markets_analyzed": [],
+        "by_severity": {"critical": 0, "warning": 0, "minor": 0}
+    }
+
+    # Pour chaque marché, comparer avec le marché de référence
+    for market_name, market_data in price_cache._cache.items():
+        if market_name == reference_market:
+            continue
+
+        market_prices = market_data.get("prices", {})
+        market_currency = market_data.get("currency", "EUR")
+        market_config = COUNTRIES.get(market_name, {})
+        expected_rate = market_config.get("exchange_rate", 1.0)
+
+        stats["markets_analyzed"].append(market_name)
+
+        for variant_id, ref_price_info in ref_prices.items():
+            if variant_id not in market_prices:
+                continue
+
+            stats["total_comparisons"] += 1
+
+            ref_price = float(ref_price_info.get("price", 0))
+            market_price_info = market_prices[variant_id]
+            market_price = float(market_price_info.get("price", 0))
+
+            if ref_price <= 0 or market_price <= 0:
+                continue
+
+            # Prix attendu = prix de référence * taux de change
+            expected_price = ref_price * expected_rate
+
+            # Calculer l'écart
+            if expected_price > 0:
+                deviation_percent = abs((market_price - expected_price) / expected_price) * 100
+            else:
+                deviation_percent = 0
+
+            # Si l'écart dépasse la tolérance, c'est une anomalie
+            if deviation_percent > request.tolerance_percent:
+                # Déterminer la sévérité
+                if deviation_percent > 50:
+                    severity = "critical"
+                elif deviation_percent > 30:
+                    severity = "warning"
+                else:
+                    severity = "minor"
+
+                stats["anomalies_found"] += 1
+                stats["by_severity"][severity] += 1
+
+                anomalies.append({
+                    "variant_id": variant_id,
+                    "reference_market": reference_market,
+                    "reference_price": ref_price,
+                    "reference_currency": ref_currency,
+                    "comparison_market": market_name,
+                    "actual_price": market_price,
+                    "expected_price": round(expected_price, 2),
+                    "market_currency": market_currency,
+                    "exchange_rate": expected_rate,
+                    "deviation_percent": round(deviation_percent, 1),
+                    "severity": severity,
+                    "suggested_price": round(expected_price, 2)
+                })
+
+    # Trier les anomalies par sévérité et écart
+    anomalies.sort(key=lambda x: (-{"critical": 3, "warning": 2, "minor": 1}[x["severity"]], -x["deviation_percent"]))
+
+    logger.info(f"Coherence analysis complete: {stats['anomalies_found']} anomalies found")
+
+    return {
+        "stats": stats,
+        "anomalies": anomalies[:500],  # Limiter à 500 pour l'affichage
+        "reference_market": reference_market,
+        "tolerance_percent": request.tolerance_percent
+    }
+
+
+@router.get("/coherence/markets")
+async def get_available_markets_for_coherence():
+    """Retourne les marchés disponibles pour l'analyse de cohérence"""
+    from app.services.price_cache import price_cache
+
+    if not price_cache.is_loaded:
+        return {"markets": list(COUNTRIES.keys()), "source": "static"}
+
+    markets = []
+    for market_name, market_data in price_cache._cache.items():
+        markets.append({
+            "name": market_name,
+            "currency": market_data.get("currency", "EUR"),
+            "prices_count": len(market_data.get("prices", {}))
+        })
+
+    markets.sort(key=lambda x: x["name"])
+    return {"markets": markets, "source": "cache"}
+
+
+class CoherenceFixRequest(BaseModel):
+    """Corrige les anomalies détectées"""
+    anomaly_ids: List[str]  # Liste des variant_ids à corriger
+    use_suggested_prices: bool = True
+
+
+@router.post("/coherence/fix-preview")
+async def preview_coherence_fix(request: CoherenceAnalysisRequest):
+    """
+    Prévisualise les corrections à appliquer pour toutes les anomalies détectées.
+    """
+    # D'abord analyser
+    analysis = await analyze_price_coherence(request)
+
+    # Préparer les corrections
+    corrections = []
+    for anomaly in analysis["anomalies"]:
+        corrections.append({
+            "variant_id": anomaly["variant_id"],
+            "market": anomaly["comparison_market"],
+            "current_price": anomaly["actual_price"],
+            "suggested_price": anomaly["suggested_price"],
+            "currency": anomaly["market_currency"],
+            "deviation_percent": anomaly["deviation_percent"],
+            "severity": anomaly["severity"]
+        })
+
+    return {
+        "stats": analysis["stats"],
+        "corrections": corrections,
+        "reference_market": analysis["reference_market"]
+    }
+
+
+class CoherenceApplyRequest(BaseModel):
+    """Appliquer les corrections de cohérence"""
+    corrections: List[dict]  # Liste de {variant_id, market, suggested_price, currency}
+    dry_run: bool = False
+
+
+@router.post("/coherence/apply")
+async def apply_coherence_corrections(request: CoherenceApplyRequest):
+    """
+    Applique les corrections de cohérence sur Shopify.
+    Utilise les prix suggérés avec les terminaisons psychologiques appropriées.
+    """
+    global apply_progress
+    import logging
+    logger = logging.getLogger(__name__)
+
+    if request.dry_run:
+        return {
+            "applied": False,
+            "dry_run": True,
+            "would_update": len(request.corrections),
+            "corrections": request.corrections[:50]
+        }
+
+    # Initialiser la progression
+    apply_progress = {
+        "active": True,
+        "current_market": "Préparation des corrections...",
+        "markets_done": 0,
+        "total_markets": 0,
+        "variants_updated": 0,
+        "errors": []
+    }
+
+    try:
+        # Grouper les corrections par marché
+        corrections_by_market = {}
+        for correction in request.corrections:
+            market = correction.get("market")
+            if market not in corrections_by_market:
+                corrections_by_market[market] = []
+
+            # Appliquer la terminaison psychologique au prix suggéré
+            suggested_price = float(correction.get("suggested_price", 0))
+            final_price = apply_psychological_ending(suggested_price, market)
+
+            # Calculer un compare_at basé sur le prix corrigé
+            compare_at_raw = calculate_compare_at(final_price, 0.40)  # 40% de réduction affichée
+            compare_at_price = apply_psychological_ending(compare_at_raw, market)
+
+            corrections_by_market[market].append({
+                "variant_id": correction.get("variant_id"),
+                "price": final_price,
+                "compare_at_price": compare_at_price
+            })
+
+        apply_progress["total_markets"] = len(corrections_by_market)
+        logger.info(f"Applying corrections to {len(corrections_by_market)} markets")
+
+        results = {"success": [], "errors": [], "updated_count": 0}
+        cache_updates = []
+
+        for idx, (market, corrections) in enumerate(corrections_by_market.items()):
+            apply_progress["current_market"] = market
+            apply_progress["markets_done"] = idx
+
+            try:
+                update_result = await shopify_service.bulk_update_prices(market, corrections)
+
+                if update_result.get("success"):
+                    updated_count = update_result.get("updated", len(corrections))
+                    results["success"].append({
+                        "market": market,
+                        "updated": updated_count
+                    })
+                    results["updated_count"] += updated_count
+                    apply_progress["variants_updated"] += updated_count
+
+                    # Préparer les mises à jour du cache
+                    for corr in corrections:
+                        cache_updates.append({
+                            "market": market,
+                            "variant_id": corr["variant_id"],
+                            "price": corr["price"],
+                            "compare_at_price": corr["compare_at_price"]
+                        })
+                else:
+                    error_msg = f"{market}: {update_result.get('error')}"
+                    results["errors"].append(error_msg)
+                    apply_progress["errors"].append(error_msg)
+
+            except Exception as e:
+                error_msg = f"{market}: {str(e)}"
+                results["errors"].append(error_msg)
+                apply_progress["errors"].append(error_msg)
+                logger.error(f"Error applying corrections to {market}: {e}")
+
+        # Mettre à jour le cache
+        if cache_updates:
+            cache_updated = price_cache.update_prices(cache_updates, save=True)
+            results["cache_updated"] = cache_updated
+
+        # Finaliser
+        apply_progress["current_market"] = "Terminé"
+        apply_progress["markets_done"] = len(corrections_by_market)
+        apply_progress["active"] = False
+
+        log_operation("coherence_fix_apply", {
+            "markets_count": len(corrections_by_market),
+            "total_corrections": len(request.corrections),
+            "updated_count": results["updated_count"],
+            "errors_count": len(results["errors"])
+        })
+
+        return {
+            "applied": True,
+            "results": results
+        }
+
+    except Exception as e:
+        apply_progress["active"] = False
+        logger.error(f"Coherence fix failed: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
