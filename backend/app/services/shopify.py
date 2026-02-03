@@ -72,9 +72,13 @@ class ShopifyService:
     # ========================================
     # MARKETS
     # ========================================
-    
+
     async def get_all_markets(self) -> List[Dict]:
-        """Récupère tous les marchés avec leurs catalogues et priceLists"""
+        """
+        Récupère tous les marchés avec leurs catalogues et priceLists.
+        Depuis 2024, Shopify lie les PriceLists aux Catalogs, pas directement aux Markets.
+        Architecture: Market → Catalogs → PriceList
+        """
         query = """
         query GetMarkets($first: Int!, $after: String) {
             markets(first: $first, after: $after) {
@@ -90,10 +94,27 @@ class ShopifyService:
                                 currencyCode
                             }
                         }
-                        priceList {
-                            id
-                            name
-                            currency
+                        catalogs(first: 10) {
+                            edges {
+                                node {
+                                    id
+                                    title
+                                    ... on CompanyLocationCatalog {
+                                        priceList {
+                                            id
+                                            name
+                                            currency
+                                        }
+                                    }
+                                    ... on MarketCatalog {
+                                        priceList {
+                                            id
+                                            name
+                                            currency
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     cursor
@@ -104,41 +125,158 @@ class ShopifyService:
             }
         }
         """
-        
+
         all_markets = []
         has_next = True
         cursor = None
-        
+
         while has_next:
             variables = {"first": 50}
             if cursor:
                 variables["after"] = cursor
-            
+
             try:
                 result = await self.execute_query(query, variables)
-                
+
                 if "data" in result and "markets" in result["data"]:
                     edges = result["data"]["markets"]["edges"]
                     logger.info(f"Found {len(edges)} markets in this batch")
-                    
+
                     for edge in edges:
                         market = edge["node"]
                         market["numericId"] = market["id"].split("/")[-1]
+
+                        # Extraire la PriceList du premier Catalog qui en a une
+                        price_list = None
+                        catalogs = market.get("catalogs", {}).get("edges", [])
+                        for catalog_edge in catalogs:
+                            catalog = catalog_edge.get("node", {})
+                            if catalog.get("priceList"):
+                                price_list = catalog["priceList"]
+                                break
+
+                        # Ajouter priceList au market pour compatibilité
+                        market["priceList"] = price_list
+
                         all_markets.append(market)
                         cursor = edge["cursor"]
-                    
+
                     has_next = result["data"]["markets"]["pageInfo"]["hasNextPage"]
                 else:
                     logger.warning(f"No data in result: {result}")
                     has_next = False
-                    
+
             except Exception as e:
                 logger.error(f"Failed to get markets: {str(e)}")
                 has_next = False
-        
+
         logger.info(f"Total markets found: {len(all_markets)}")
+
+        # Log pour debug
+        markets_with_pricelist = [m for m in all_markets if m.get("priceList")]
+        logger.info(f"Markets with PriceList via Catalogs: {len(markets_with_pricelist)}/{len(all_markets)}")
+
+        # Si aucun marché n'a de PriceList via Catalogs, essayer de les récupérer directement
+        if len(markets_with_pricelist) == 0 and len(all_markets) > 0:
+            logger.info("No PriceLists found via Catalogs, trying direct PriceList fetch...")
+            all_markets = await self._associate_pricelists_to_markets(all_markets)
+            markets_with_pricelist = [m for m in all_markets if m.get("priceList")]
+            logger.info(f"Markets with PriceList after direct fetch: {len(markets_with_pricelist)}/{len(all_markets)}")
+
+        for m in all_markets:
+            pl = m.get("priceList")
+            logger.info(f"  - {m['name']}: priceList={pl['id'] if pl else 'None'}")
+
         return all_markets
-    
+
+    async def _associate_pricelists_to_markets(self, markets: List[Dict]) -> List[Dict]:
+        """
+        Récupère toutes les PriceLists et les associe aux marchés.
+        Fallback si les Catalogs ne contiennent pas les PriceLists.
+        """
+        query = """
+        query GetPriceLists($first: Int!, $after: String) {
+            priceLists(first: $first, after: $after) {
+                edges {
+                    node {
+                        id
+                        name
+                        currency
+                        catalog {
+                            id
+                            title
+                        }
+                    }
+                    cursor
+                }
+                pageInfo {
+                    hasNextPage
+                }
+            }
+        }
+        """
+
+        all_pricelists = []
+        has_next = True
+        cursor = None
+
+        while has_next:
+            variables = {"first": 50}
+            if cursor:
+                variables["after"] = cursor
+
+            try:
+                result = await self.execute_query(query, variables)
+
+                if "data" in result and "priceLists" in result["data"]:
+                    edges = result["data"]["priceLists"]["edges"]
+                    logger.info(f"Found {len(edges)} priceLists in this batch")
+
+                    for edge in edges:
+                        pl = edge["node"]
+                        all_pricelists.append(pl)
+                        cursor = edge["cursor"]
+
+                    has_next = result["data"]["priceLists"]["pageInfo"]["hasNextPage"]
+                else:
+                    logger.warning(f"No priceLists data in result: {result}")
+                    has_next = False
+
+            except Exception as e:
+                logger.error(f"Failed to get priceLists: {str(e)}")
+                has_next = False
+
+        logger.info(f"Total PriceLists found: {len(all_pricelists)}")
+        for pl in all_pricelists:
+            logger.info(f"  PriceList: {pl['name']} ({pl['currency']}) - catalog: {pl.get('catalog', {}).get('title', 'N/A')}")
+
+        # Associer les PriceLists aux marchés par nom
+        # Convention: PriceList name contient souvent le nom du marché ou "International" etc.
+        for market in markets:
+            market_name = market["name"].lower()
+            market_currency = market.get("currencySettings", {}).get("baseCurrency", {}).get("currencyCode", "")
+
+            # Chercher une PriceList correspondante
+            for pl in all_pricelists:
+                pl_name = pl.get("name", "").lower()
+                pl_currency = pl.get("currency", "")
+                catalog_title = pl.get("catalog", {}).get("title", "").lower() if pl.get("catalog") else ""
+
+                # Match par nom du marché dans le nom de la PriceList ou du Catalog
+                if (market_name in pl_name or
+                    market_name in catalog_title or
+                    (pl_currency == market_currency and market_name != "international")):
+
+                    market["priceList"] = {
+                        "id": pl["id"],
+                        "name": pl["name"],
+                        "currency": pl["currency"]
+                    }
+                    logger.info(f"Matched {market['name']} -> PriceList {pl['name']}")
+                    break
+
+        return markets
+
     # ========================================
     # PRODUCTS - AVEC PAGINATION COMPLÈTE
     # ========================================
