@@ -75,9 +75,13 @@ class ShopifyService:
 
     async def get_all_markets(self) -> List[Dict]:
         """
-        Récupère tous les marchés avec leurs catalogues et priceLists.
-        Depuis 2024, Shopify lie les PriceLists aux Catalogs, pas directement aux Markets.
-        Architecture: Market → Catalogs → PriceList
+        Récupère TOUS les marchés Shopify, avec ou sans PriceList.
+
+        Types de marchés:
+        1. Marchés avec PriceList (via Catalog) → prix fixes personnalisés
+        2. Marchés sans PriceList → utilisent les prix de base avec ajustements % ou conversion
+
+        Retourne TOUS les marchés pour que l'UI les affiche.
         """
         query = """
         query GetMarkets($first: Int!, $after: String) {

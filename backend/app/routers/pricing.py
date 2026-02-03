@@ -283,7 +283,9 @@ def log_operation(operation_type: str, details: dict):
 async def get_pricing_config():
     """
     Configuration des marchés disponibles
-    Utilise le cache si chargé, sinon Shopify, sinon config statique
+    Utilise le cache si chargé, sinon Shopify, sinon config statique.
+
+    IMPORTANT: Retourne TOUS les marchés, y compris ceux sans PriceList.
     """
     from app.services.price_cache import price_cache
     import logging
@@ -296,6 +298,9 @@ async def get_pricing_config():
         for market_name, market_data in price_cache._cache.items():
             currency = market_data.get("currency", "EUR")
             config = COUNTRIES.get(market_name, {})
+            has_pricelist = market_data.get("hasPriceList", False)
+            prices_count = len(market_data.get("prices", {}))
+
             countries.append({
                 "name": market_name,
                 "currency": currency,
@@ -303,7 +308,9 @@ async def get_pricing_config():
                 "vat": config.get("vat", 0),
                 "exchange_rate": config.get("exchange_rate", 1),
                 "adjustment": config.get("adjustment", "none"),
-                "prices_count": len(market_data.get("prices", {}))
+                "prices_count": prices_count,
+                "hasPriceList": has_pricelist,
+                "usesBasePrices": market_data.get("usesBasePrices", False)
             })
         countries.sort(key=lambda x: x["name"])
         return {"countries": countries, "source": "cache"}
@@ -321,7 +328,15 @@ async def get_pricing_config():
             for market in markets:
                 market_name = market["name"]
                 price_list = market.get("priceList")
-                currency = price_list["currency"] if price_list else "EUR"
+
+                # Récupérer la devise depuis PriceList ou currencySettings
+                if price_list:
+                    currency = price_list.get("currency", "EUR")
+                else:
+                    currency_settings = market.get("currencySettings", {})
+                    base_currency = currency_settings.get("baseCurrency", {})
+                    currency = base_currency.get("currencyCode", "EUR")
+
                 config = COUNTRIES.get(market_name, {})
                 countries.append({
                     "name": market_name,
@@ -329,7 +344,9 @@ async def get_pricing_config():
                     "ending": config.get("ending", 0.99),
                     "vat": config.get("vat", 0),
                     "exchange_rate": config.get("exchange_rate", 1),
-                    "adjustment": config.get("adjustment", "none")
+                    "adjustment": config.get("adjustment", "none"),
+                    "hasPriceList": price_list is not None,
+                    "usesBasePrices": price_list is None
                 })
             countries.sort(key=lambda x: x["name"])
             return {"countries": countries, "source": "shopify"}
@@ -351,7 +368,9 @@ async def get_pricing_config():
             "ending": config["ending"],
             "vat": config["vat"],
             "exchange_rate": config["exchange_rate"],
-            "adjustment": config["adjustment"]
+            "adjustment": config["adjustment"],
+            "hasPriceList": True,  # On assume que la config statique a des prix
+            "usesBasePrices": False
         }
         for name, config in COUNTRIES.items()
     ]

@@ -172,16 +172,24 @@ class PriceCache:
         return self._load_progress
     
     def get_status(self) -> dict:
-        """Retourne le statut du cache"""
+        """Retourne le statut détaillé du cache"""
         total_prices = sum(
             len(market_data.get("prices", {}))
             for market_data in self._cache.values()
         )
+
+        markets_with_pricelist = sum(
+            1 for m in self._cache.values() if m.get("hasPriceList")
+        )
+        markets_without_pricelist = len(self._cache) - markets_with_pricelist
+
         return {
             "loaded": self._loaded,
             "loading": self._loading,
             "last_refresh": self._last_refresh.isoformat() if self._last_refresh else None,
             "markets_count": len(self._cache),
+            "markets_with_pricelist": markets_with_pricelist,
+            "markets_without_pricelist": markets_without_pricelist,
             "total_prices": total_prices,
             "progress": self._load_progress,
             "persisted": os.path.exists(CACHE_FILE),
@@ -258,7 +266,12 @@ class PriceCache:
     
     async def load_all_prices(self, shopify_service) -> bool:
         """
-        Charge tous les prix de tous les marchés.
+        Charge tous les prix de TOUS les marchés Shopify.
+
+        IMPORTANT: Gère deux types de marchés:
+        1. Marchés AVEC PriceList → charge les prix personnalisés
+        2. Marchés SANS PriceList → marque comme "base prices" (utilisent prix de base)
+
         Sauvegarde automatiquement dans le fichier après chargement.
         """
         if self._loading:
@@ -275,49 +288,53 @@ class PriceCache:
         }
 
         try:
-            logger.info("=== STARTING PRICE CACHE LOAD ===")
+            logger.info("=== STARTING PRICE CACHE LOAD (ALL MARKETS) ===")
 
-            # Récupérer tous les marchés
+            # Récupérer TOUS les marchés (avec ou sans PriceList)
             try:
-                markets = await shopify_service.get_all_markets()
+                all_markets = await shopify_service.get_all_markets()
             except Exception as e:
                 logger.error(f"Failed to fetch markets from Shopify: {e}")
                 self._load_progress["error"] = f"Erreur Shopify: {str(e)}"
                 return False
 
-            if not markets:
+            if not all_markets:
                 logger.error("No markets returned from Shopify. Check API credentials.")
                 self._load_progress["error"] = "Aucun marché retourné par Shopify. Vérifiez les credentials."
                 return False
 
-            markets_with_pricelist = [m for m in markets if m.get("priceList")]
+            # Séparer les marchés avec/sans PriceList
+            markets_with_pricelist = [m for m in all_markets if m.get("priceList")]
+            markets_without_pricelist = [m for m in all_markets if not m.get("priceList")]
 
-            if not markets_with_pricelist:
-                logger.error(f"No markets have PriceLists configured. Total markets: {len(markets)}")
-                self._load_progress["error"] = f"Aucun marché n'a de PriceList configurée ({len(markets)} marchés trouvés)."
-                return False
+            logger.info(f"Total markets: {len(all_markets)}")
+            logger.info(f"  - With PriceList: {len(markets_with_pricelist)}")
+            logger.info(f"  - Without PriceList (using base prices): {len(markets_without_pricelist)}")
 
-            self._load_progress["total_markets"] = len(markets_with_pricelist)
-            logger.info(f"Found {len(markets_with_pricelist)} markets with PriceLists out of {len(markets)} total")
-            
+            # On traite TOUS les marchés
+            self._load_progress["total_markets"] = len(all_markets)
+
             new_cache = {}
-            
+
+            # ==== PHASE 1: Marchés AVEC PriceList ====
+            logger.info("--- Phase 1: Loading markets with PriceLists ---")
+
             for idx, market in enumerate(markets_with_pricelist):
                 market_name = market["name"]
                 price_list = market["priceList"]
-                
-                self._load_progress["current_market"] = market_name
+
+                self._load_progress["current_market"] = f"{market_name} (PriceList)"
                 self._load_progress["markets_done"] = idx
-                
+
                 logger.info(f"Loading prices for {market_name} ({idx + 1}/{len(markets_with_pricelist)})")
-                
+
                 try:
-                    # Charger TOUS les prix de ce marché (pas de limite)
+                    # Charger TOUS les prix de cette PriceList
                     prices = await self._load_all_pricelist_prices(
-                        shopify_service, 
+                        shopify_service,
                         price_list["id"]
                     )
-                    
+
                     # Organiser par variant_id
                     prices_dict = {}
                     for p in prices:
@@ -326,45 +343,80 @@ class PriceCache:
                             "compareAtPrice": p["compareAtPrice"],
                             "currency": p["currency"]
                         }
-                    
+
                     new_cache[market_name] = {
                         "marketId": market["id"],
                         "currency": price_list["currency"],
                         "priceListId": price_list["id"],
+                        "hasPriceList": True,
                         "prices": prices_dict
                     }
-                    
+
                     self._load_progress["total_prices"] += len(prices_dict)
                     logger.info(f"  → {len(prices_dict)} prices loaded for {market_name}")
-                    
+
                 except Exception as e:
                     logger.error(f"Error loading prices for {market_name}: {e}")
-            
-            # VALIDATION: Ne pas sauvegarder un cache vide
-            total_prices = sum(len(m.get("prices", {})) for m in new_cache.values())
 
-            if len(new_cache) == 0 or total_prices == 0:
-                logger.error(f"Cache load resulted in empty data ({len(new_cache)} markets, {total_prices} prices). Not saving.")
-                self._load_progress["error"] = "Le chargement a retourné 0 prix. Vérifiez les PriceLists Shopify."
+            # ==== PHASE 2: Marchés SANS PriceList ====
+            logger.info("--- Phase 2: Adding markets without PriceLists ---")
+
+            for idx, market in enumerate(markets_without_pricelist):
+                market_name = market["name"]
+                currency_settings = market.get("currencySettings", {})
+                base_currency = currency_settings.get("baseCurrency", {})
+                currency = base_currency.get("currencyCode", "EUR")
+
+                self._load_progress["current_market"] = f"{market_name} (base prices)"
+                self._load_progress["markets_done"] = len(markets_with_pricelist) + idx
+
+                # Ces marchés n'ont pas de prix personnalisés
+                # Ils utilisent les prix de base convertis automatiquement par Shopify
+                new_cache[market_name] = {
+                    "marketId": market["id"],
+                    "currency": currency,
+                    "priceListId": None,
+                    "hasPriceList": False,
+                    "usesBasePrices": True,
+                    "primary": market.get("primary", False),
+                    "enabled": market.get("enabled", True),
+                    "prices": {}  # Pas de prix spécifiques - utilise les prix de base
+                }
+
+                logger.info(f"  → Added {market_name} (currency: {currency}, uses base prices)")
+
+            # VALIDATION: Au moins 1 marché doit être présent
+            if len(new_cache) == 0:
+                logger.error("No markets loaded at all!")
+                self._load_progress["error"] = "Aucun marché n'a pu être chargé."
                 return False
+
+            total_prices = sum(len(m.get("prices", {})) for m in new_cache.values())
+            markets_with_prices = sum(1 for m in new_cache.values() if m.get("hasPriceList"))
 
             # Remplacer le cache
             self._cache = new_cache
             self._loaded = True
             self._last_refresh = datetime.now()
             self._load_progress["current_market"] = "Terminé"
-            self._load_progress["markets_done"] = len(markets_with_pricelist)
+            self._load_progress["markets_done"] = len(all_markets)
             self._load_progress["error"] = None
 
-            logger.info(f"=== PRICE CACHE LOADED: {len(self._cache)} markets, {total_prices} prices ===")
+            logger.info(f"=== PRICE CACHE LOADED ===")
+            logger.info(f"  Total markets: {len(self._cache)}")
+            logger.info(f"  Markets with custom prices: {markets_with_prices}")
+            logger.info(f"  Markets using base prices: {len(self._cache) - markets_with_prices}")
+            logger.info(f"  Total custom prices: {total_prices}")
 
             # SAUVEGARDER DANS LE FICHIER
             self._save_to_file()
 
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to load price cache: {e}")
+            import traceback
+            traceback.print_exc()
             return False
         finally:
             self._loading = False

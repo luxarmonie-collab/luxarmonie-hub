@@ -114,7 +114,13 @@ function CacheStatus({ onCacheLoaded }) {
               )}
               {!hasError && isLoaded && (
                 <>
-                  {status.markets_count} marchés • {status.total_prices?.toLocaleString()} prix
+                  {status.markets_count} marchés
+                  {status.markets_with_pricelist !== undefined && (
+                    <span className="text-green-600 ml-1">
+                      ({status.markets_with_pricelist} avec prix)
+                    </span>
+                  )}
+                  {' • '}{status.total_prices?.toLocaleString()} prix
                   {status.last_refresh && (
                     <span className="ml-2">
                       • MàJ: {new Date(status.last_refresh).toLocaleTimeString()}
@@ -255,7 +261,11 @@ function PricingModule() {
     if (selectAllCountries) {
       setSelectedCountries([])
     } else {
-      setSelectedCountries(countries.map(c => c.name))
+      // Ne sélectionner que les marchés avec PriceList (modifiables)
+      const modifiableCountries = countries
+        .filter(c => c.hasPriceList !== false && c.usesBasePrices !== true)
+        .map(c => c.name)
+      setSelectedCountries(modifiableCountries)
     }
     setSelectAllCountries(!selectAllCountries)
   }
@@ -618,37 +628,66 @@ function PricingModule() {
         </div>
 
         {/* Bouton Tous les marchés */}
-        <label className="flex items-center gap-3 p-3 bg-luxarmonie-gray-50 rounded-lg cursor-pointer mb-4 hover:bg-luxarmonie-gray-100 transition-colors">
-          <input
-            type="checkbox"
-            checked={selectAllCountries}
-            onChange={handleSelectAllCountries}
-            className="checkbox-luxarmonie"
-          />
-          <span className="font-medium">Tous les marchés ({countries.length})</span>
-        </label>
+        {(() => {
+          const modifiableCount = countries.filter(c => c.hasPriceList !== false && c.usesBasePrices !== true).length
+          const totalCount = countries.length
+          return (
+            <label className="flex items-center gap-3 p-3 bg-luxarmonie-gray-50 rounded-lg cursor-pointer mb-4 hover:bg-luxarmonie-gray-100 transition-colors">
+              <input
+                type="checkbox"
+                checked={selectAllCountries}
+                onChange={handleSelectAllCountries}
+                className="checkbox-luxarmonie"
+              />
+              <span className="font-medium">
+                Tous les marchés modifiables ({modifiableCount}/{totalCount})
+              </span>
+              {modifiableCount < totalCount && (
+                <span className="text-xs text-gray-500">
+                  ({totalCount - modifiableCount} sans PriceList)
+                </span>
+              )}
+            </label>
+          )
+        })()}
 
         {/* Liste des pays */}
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 max-h-48 overflow-y-auto">
-          {countries.map((country) => (
-            <label
-              key={country.name}
-              className={`flex items-center gap-2 p-2 rounded cursor-pointer text-sm transition-colors ${
-                selectedCountries.includes(country.name)
-                  ? 'bg-luxarmonie-terracotta/10 text-luxarmonie-terracotta'
-                  : 'hover:bg-luxarmonie-gray-50'
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={selectedCountries.includes(country.name)}
-                onChange={() => handleCountryToggle(country.name)}
-                className="checkbox-luxarmonie w-4 h-4"
-              />
-              <span className="truncate">{country.name}</span>
-              <span className="text-xs text-luxarmonie-gray-400">{country.currency}</span>
-            </label>
-          ))}
+          {countries.map((country) => {
+            const hasPriceList = country.hasPriceList !== false
+            const isDisabled = country.usesBasePrices === true
+
+            return (
+              <label
+                key={country.name}
+                title={isDisabled ? "Ce marché utilise les prix de base (pas de PriceList)" : ""}
+                className={`flex items-center gap-2 p-2 rounded text-sm transition-colors ${
+                  isDisabled
+                    ? 'cursor-not-allowed opacity-50'
+                    : 'cursor-pointer'
+                } ${
+                  selectedCountries.includes(country.name)
+                    ? 'bg-luxarmonie-terracotta/10 text-luxarmonie-terracotta'
+                    : isDisabled
+                      ? 'bg-gray-100'
+                      : 'hover:bg-luxarmonie-gray-50'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedCountries.includes(country.name)}
+                  onChange={() => !isDisabled && handleCountryToggle(country.name)}
+                  disabled={isDisabled}
+                  className="checkbox-luxarmonie w-4 h-4"
+                />
+                <span className="truncate">{country.name}</span>
+                <span className="text-xs text-luxarmonie-gray-400">{country.currency}</span>
+                {isDisabled && (
+                  <span className="text-[10px] text-gray-400" title="Pas de PriceList">🔒</span>
+                )}
+              </label>
+            )
+          })}
         </div>
       </div>
 
