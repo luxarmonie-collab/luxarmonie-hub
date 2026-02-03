@@ -99,13 +99,6 @@ class ShopifyService:
                                 node {
                                     id
                                     title
-                                    ... on CompanyLocationCatalog {
-                                        priceList {
-                                            id
-                                            name
-                                            currency
-                                        }
-                                    }
                                     ... on MarketCatalog {
                                         priceList {
                                             id
