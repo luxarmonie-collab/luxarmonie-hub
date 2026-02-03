@@ -75,13 +75,8 @@ class ShopifyService:
 
     async def get_all_markets(self) -> List[Dict]:
         """
-        Récupère TOUS les marchés Shopify, avec ou sans PriceList.
-
-        Types de marchés:
-        1. Marchés avec PriceList (via Catalog) → prix fixes personnalisés
-        2. Marchés sans PriceList → utilisent les prix de base avec ajustements % ou conversion
-
-        Retourne TOUS les marchés pour que l'UI les affiche.
+        Récupère TOUS les marchés Shopify avec leurs PriceLists.
+        Requête SIMPLE: market → priceList directement (pas de Catalogs).
         """
         query = """
         query GetMarkets($first: Int!, $after: String) {
@@ -98,20 +93,10 @@ class ShopifyService:
                                 currencyCode
                             }
                         }
-                        catalogs(first: 10) {
-                            edges {
-                                node {
-                                    id
-                                    title
-                                    ... on MarketCatalog {
-                                        priceList {
-                                            id
-                                            name
-                                            currency
-                                        }
-                                    }
-                                }
-                            }
+                        priceList {
+                            id
+                            name
+                            currency
                         }
                     }
                     cursor
@@ -154,22 +139,7 @@ class ShopifyService:
                             continue
 
                         market["numericId"] = market.get("id", "").split("/")[-1]
-
-                        # Extraire la PriceList du premier Catalog qui en a une
-                        price_list = None
-                        catalogs_data = market.get("catalogs")
-                        if catalogs_data:
-                            catalog_edges = catalogs_data.get("edges") or []
-                            for catalog_edge in catalog_edges:
-                                if not catalog_edge:
-                                    continue
-                                catalog = catalog_edge.get("node")
-                                if catalog and catalog.get("priceList"):
-                                    price_list = catalog["priceList"]
-                                    break
-
-                        # Ajouter priceList au market pour compatibilité
-                        market["priceList"] = price_list
+                        # priceList est déjà directement sur le market (pas besoin de parsing)
 
                         all_markets.append(market)
                         cursor = edge.get("cursor")
@@ -190,14 +160,7 @@ class ShopifyService:
 
         # Log pour debug
         markets_with_pricelist = [m for m in all_markets if m.get("priceList")]
-        logger.info(f"Markets with PriceList via Catalogs: {len(markets_with_pricelist)}/{len(all_markets)}")
-
-        # Si aucun marché n'a de PriceList via Catalogs, essayer de les récupérer directement
-        if len(markets_with_pricelist) == 0 and len(all_markets) > 0:
-            logger.info("No PriceLists found via Catalogs, trying direct PriceList fetch...")
-            all_markets = await self._associate_pricelists_to_markets(all_markets)
-            markets_with_pricelist = [m for m in all_markets if m.get("priceList")]
-            logger.info(f"Markets with PriceList after direct fetch: {len(markets_with_pricelist)}/{len(all_markets)}")
+        logger.info(f"Markets with PriceList: {len(markets_with_pricelist)}/{len(all_markets)}")
 
         for m in all_markets:
             pl = m.get("priceList")
