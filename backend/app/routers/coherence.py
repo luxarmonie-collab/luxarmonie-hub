@@ -483,16 +483,17 @@ async def analyze_coherence(request: AnalyzeRequest):
     if "intra_product" in request.analysis_types:
         logger.info("Running intra-product analysis...")
 
-        # Analyser le marché de référence
-        intra_ref = await analyze_intra_product(products_map, reference_market, ref_cache)
-        all_anomalies.extend(intra_ref)
-
-        # Analyser chaque marché cible
-        for market_name in target_markets:
-            market_data = price_cache._cache.get(market_name)
-            if market_data and market_data.get("prices"):
-                intra_market = await analyze_intra_product(products_map, market_name, market_data)
-                all_anomalies.extend(intra_market)
+        # Si un marché cible est spécifié, analyser UNIQUEMENT celui-ci
+        # Sinon analyser uniquement le marché de référence
+        if request.target_market:
+            intra_target_data = price_cache._cache.get(request.target_market)
+            if intra_target_data and intra_target_data.get("prices"):
+                intra_results = await analyze_intra_product(products_map, request.target_market, intra_target_data)
+                all_anomalies.extend(intra_results)
+        else:
+            # Analyser le marché de référence uniquement
+            intra_ref = await analyze_intra_product(products_map, reference_market, ref_cache)
+            all_anomalies.extend(intra_ref)
 
         logger.info(f"Intra-product: {len([a for a in all_anomalies if a['type'] == 'intra_product'])} anomalies")
 
