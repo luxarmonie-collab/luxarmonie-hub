@@ -1,539 +1,604 @@
-import { useState, useEffect } from 'react'
-import {
-  BarChart3,
-  AlertTriangle,
-  CheckCircle,
-  Search,
-  Download,
-  RefreshCw,
-  Loader2,
-  AlertCircle,
-  TrendingUp,
-  TrendingDown,
-  Filter,
-  ChevronDown,
-  Check,
-  X
-} from 'lucide-react'
-import axios from 'axios'
+"""
+Module d'analyse de cohérence des prix V2
+- Niveau 1: Cohérence intra-produit (tailles croissantes)
+- Niveau 2: Cohérence cross-marchés (écarts vs France)
+- Niveau 3: Résumé IA via Claude API
+"""
 
-const API_URL = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api` : '/api'
+import re
+import os
+import math
+import logging
+import httpx
+from typing import List, Dict, Optional, Tuple
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from app.services.shopify import shopify_service
+from app.services.price_cache import price_cache
+from app.config.countries import COUNTRIES
 
-function CoherenceModule() {
-  const [loading, setLoading] = useState(false)
-  const [analyzing, setAnalyzing] = useState(false)
-  const [message, setMessage] = useState(null)
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/coherence", tags=["coherence"])
 
-  // Paramètres d'analyse
-  const [tolerancePercent, setTolerancePercent] = useState(15)
-  const [referenceMarket, setReferenceMarket] = useState('France')
-  const [availableMarkets, setAvailableMarkets] = useState([])
 
-  // Résultats
-  const [analysis, setAnalysis] = useState(null)
+# ========================================
+# MODELS
+# ========================================
 
-  // Filtres
-  const [severityFilter, setSeverityFilter] = useState('all')
-  const [marketFilter, setMarketFilter] = useState('all')
-  const [searchQuery, setSearchQuery] = useState('')
+class AnalyzeRequest(BaseModel):
+    tolerance_percent: float = 15.0
+    reference_market: str = "France"
+    target_market: Optional[str] = None  # None = tous les marchés
+    analysis_types: List[str] = ["intra_product", "cross_market"]
 
-  // Sélection pour correction
-  const [selectedAnomalies, setSelectedAnomalies] = useState(new Set())
-  const [applying, setApplying] = useState(false)
 
-  // Charger les marchés disponibles
-  useEffect(() => {
-    loadMarkets()
-  }, [])
+class ApplyCorrectionsRequest(BaseModel):
+    corrections: List[dict]
+    dry_run: bool = False
 
-  const loadMarkets = async () => {
-    try {
-      const response = await axios.get(`${API_URL}/pricing/coherence/markets`)
-      setAvailableMarkets(response.data.markets || [])
-    } catch (error) {
-      console.error('Error loading markets:', error)
+
+# ========================================
+# HELPERS - PARSING TAILLES
+# ========================================
+
+def extract_size_value(variant_title: str) -> Optional[float]:
+    """
+    Extrait une valeur numérique de taille depuis le titre de variante.
+    Gère: 'Diamètre 50cm', '40 cm', '100cm', 'S', 'M', 'L', 'XL', etc.
+    """
+    if not variant_title:
+        return None
+
+    title = variant_title.strip().lower()
+
+    # Pattern 1: Nombre + cm/mm/m (ex: "Diamètre 50cm", "40 cm", "100cm")
+    match = re.search(r'(\d+(?:\.\d+)?)\s*(?:cm|mm|m\b)', title)
+    if match:
+        val = float(match.group(1))
+        # Convertir mm en cm pour comparaison
+        if 'mm' in title:
+            val = val / 10
+        return val
+
+    # Pattern 2: Nombre seul significatif (ex: "30", "50")
+    match = re.search(r'\b(\d+(?:\.\d+)?)\b', title)
+    if match:
+        val = float(match.group(1))
+        if val >= 5 and val <= 500:  # Plausible comme dimension
+            return val
+
+    # Pattern 3: Tailles S/M/L/XL
+    size_map = {
+        'xxs': 1, 'xs': 2, 's': 3, 'small': 3,
+        'm': 4, 'medium': 4,
+        'l': 5, 'large': 5,
+        'xl': 6, 'xxl': 7, 'xxxl': 8,
+        '2xl': 7, '3xl': 8
     }
-  }
+    for size_name, size_val in size_map.items():
+        if re.search(r'\b' + re.escape(size_name) + r'\b', title):
+            return size_val
 
-  const runAnalysis = async () => {
-    try {
-      setAnalyzing(true)
-      setMessage(null)
+    return None
 
-      const response = await axios.post(`${API_URL}/pricing/coherence/analyze`, {
-        tolerance_percent: tolerancePercent,
-        reference_market: referenceMarket
-      })
 
-      setAnalysis(response.data)
+def get_size_from_variant(variant_title: str) -> Tuple[Optional[float], str]:
+    """Retourne (valeur_taille, type_taille) pour grouper les variantes comparables"""
+    if not variant_title:
+        return None, "unknown"
 
-      if (response.data.stats.anomalies_found === 0) {
-        setMessage({ type: 'success', text: 'Aucune anomalie détectée ! Les prix sont cohérents.' })
-      }
-    } catch (error) {
-      console.error('Analysis error:', error)
-      setMessage({ type: 'error', text: error.response?.data?.detail || error.message })
-    } finally {
-      setAnalyzing(false)
-    }
-  }
+    title = variant_title.lower()
+    size_val = extract_size_value(variant_title)
 
-  // Filtrer les anomalies
-  const filteredAnomalies = analysis?.anomalies?.filter(a => {
-    if (severityFilter !== 'all' && a.severity !== severityFilter) return false
-    if (marketFilter !== 'all' && a.comparison_market !== marketFilter) return false
-    if (searchQuery && !a.variant_id.toLowerCase().includes(searchQuery.toLowerCase())) return false
-    return true
-  }) || []
+    if size_val is None:
+        return None, "unknown"
 
-  // Sélection des anomalies
-  const toggleSelectAnomaly = (anomalyKey) => {
-    const newSelected = new Set(selectedAnomalies)
-    if (newSelected.has(anomalyKey)) {
-      newSelected.delete(anomalyKey)
-    } else {
-      newSelected.add(anomalyKey)
-    }
-    setSelectedAnomalies(newSelected)
-  }
+    if re.search(r'cm|mm|m\b|diamètre|diametre|longueur|largeur|hauteur', title):
+        return size_val, "dimension"
+    elif re.search(r'\b(xxs|xs|s|m|l|xl|xxl|xxxl|2xl|3xl|small|medium|large)\b', title):
+        return size_val, "letter"
+    else:
+        return size_val, "numeric"
 
-  const selectAllFiltered = () => {
-    const newSelected = new Set(selectedAnomalies)
-    filteredAnomalies.forEach(a => {
-      newSelected.add(`${a.variant_id}-${a.comparison_market}`)
-    })
-    setSelectedAnomalies(newSelected)
-  }
 
-  const deselectAll = () => {
-    setSelectedAnomalies(new Set())
-  }
+# ========================================
+# ANALYSE NIVEAU 1 - INTRA-PRODUIT
+# ========================================
 
-  // Appliquer les corrections
-  const applyCorrections = async () => {
-    if (selectedAnomalies.size === 0) {
-      setMessage({ type: 'error', text: 'Sélectionnez au moins une anomalie à corriger' })
-      return
-    }
+async def analyze_intra_product(products_map: Dict, market_name: str, market_prices: Dict) -> List[dict]:
+    """
+    Détecte les incohérences de prix au sein d'un même produit.
+    Ex: 40cm à 150€ et 100cm à 120€ → CRITIQUE
+    """
+    anomalies = []
+    market_currency = market_prices.get("currency", "EUR") if isinstance(market_prices, dict) else "EUR"
+    prices_dict = market_prices.get("prices", {}) if isinstance(market_prices, dict) else {}
 
-    const corrections = analysis.anomalies
-      .filter(a => selectedAnomalies.has(`${a.variant_id}-${a.comparison_market}`))
-      .map(a => ({
-        variant_id: a.variant_id,
-        market: a.comparison_market,
-        suggested_price: a.suggested_price,
-        currency: a.market_currency
-      }))
+    for product_id, product_info in products_map.items():
+        product_title = product_info.get("title", "Unknown")
+        variants = product_info.get("variants", [])
 
-    if (!window.confirm(`Voulez-vous corriger ${corrections.length} prix ?`)) return
+        if len(variants) < 2:
+            continue
 
-    try {
-      setApplying(true)
-      setMessage(null)
+        # Grouper les variantes par couleur/type (pour ne comparer que les tailles)
+        # Extraire la partie "couleur" et la partie "taille"
+        size_groups = {}  # color_key -> [(size_val, variant_id, price, variant_title)]
 
-      const response = await axios.post(`${API_URL}/pricing/coherence/apply`, {
-        corrections,
-        dry_run: false
-      })
+        for variant in variants:
+            variant_id = variant.get("id", "")
+            variant_title = variant.get("title", "")
 
-      if (response.data.applied) {
-        setMessage({
-          type: 'success',
-          text: `✅ ${response.data.results.updated_count} prix corrigés avec succès !`
+            # Récupérer le prix du marché
+            price_info = prices_dict.get(variant_id)
+            if not price_info:
+                # Essayer avec le format numérique
+                numeric_id = variant_id.split("/")[-1] if "/" in variant_id else variant_id
+                price_info = prices_dict.get(f"gid://shopify/ProductVariant/{numeric_id}")
+                if not price_info:
+                    price_info = prices_dict.get(numeric_id)
+            if not price_info:
+                continue
+
+            price = float(price_info.get("price", 0))
+            if price <= 0:
+                continue
+
+            size_val, size_type = get_size_from_variant(variant_title)
+            if size_val is None:
+                continue
+
+            # Extraire la "couleur" (tout sauf la taille) pour grouper
+            color_key = re.sub(r'\d+\s*(?:cm|mm|m)\b', '', variant_title, flags=re.IGNORECASE).strip()
+            color_key = re.sub(r'diamètre|diametre|longueur|largeur|hauteur', '', color_key, flags=re.IGNORECASE).strip()
+            color_key = re.sub(r'\s+', ' ', color_key).strip(' -/')
+            if not color_key:
+                color_key = "default"
+
+            group_key = f"{size_type}:{color_key.lower()}"
+
+            if group_key not in size_groups:
+                size_groups[group_key] = []
+            size_groups[group_key].append((size_val, variant_id, price, variant_title))
+
+        # Analyser chaque groupe de tailles
+        for group_key, items in size_groups.items():
+            if len(items) < 2:
+                continue
+
+            # Trier par taille
+            items.sort(key=lambda x: x[0])
+
+            # Vérifier que le prix est croissant (ou au moins pas décroissant)
+            for i in range(1, len(items)):
+                prev_size, prev_vid, prev_price, prev_title = items[i - 1]
+                curr_size, curr_vid, curr_price, curr_title = items[i]
+
+                # Si la taille est plus grande mais le prix est PLUS BAS → anomalie
+                if curr_size > prev_size and curr_price < prev_price:
+                    price_diff_pct = abs((curr_price - prev_price) / prev_price) * 100
+
+                    # Déterminer la sévérité
+                    if price_diff_pct > 20:
+                        severity = "critical"
+                    elif price_diff_pct > 10:
+                        severity = "warning"
+                    else:
+                        severity = "minor"
+
+                    anomalies.append({
+                        "type": "intra_product",
+                        "severity": severity,
+                        "product_title": product_title,
+                        "product_id": product_id,
+                        "variant_id": curr_vid,
+                        "variant_title": curr_title,
+                        "market": market_name,
+                        "currency": market_currency,
+                        "current_price": curr_price,
+                        "reference_variant_title": prev_title,
+                        "reference_price": prev_price,
+                        "deviation_percent": round(price_diff_pct, 1),
+                        "suggested_price": round(prev_price * (curr_size / prev_size), 2),
+                        "description": f"'{curr_title}' ({curr_price} {market_currency}) est moins cher que '{prev_title}' ({prev_price} {market_currency}) alors que la taille est plus grande"
+                    })
+
+    return anomalies
+
+
+# ========================================
+# ANALYSE NIVEAU 2 - CROSS-MARCHÉS
+# ========================================
+
+async def analyze_cross_market(
+    products_map: Dict,
+    reference_market: str,
+    ref_cache: Dict,
+    target_markets: List[str],
+    tolerance_percent: float
+) -> List[dict]:
+    """
+    Compare les prix entre le marché de référence et les autres marchés.
+    Tient compte des taux de change configurés.
+    """
+    anomalies = []
+
+    ref_prices = ref_cache.get("prices", {})
+    ref_currency = ref_cache.get("currency", "EUR")
+
+    for market_name in target_markets:
+        if market_name == reference_market:
+            continue
+
+        market_data = price_cache._cache.get(market_name)
+        if not market_data:
+            continue
+
+        market_prices = market_data.get("prices", {})
+        market_currency = market_data.get("currency", "EUR")
+        market_config = COUNTRIES.get(market_name, {})
+        expected_rate = market_config.get("exchange_rate", 1.0)
+
+        if expected_rate <= 0:
+            expected_rate = 1.0
+
+        for variant_id, ref_price_info in ref_prices.items():
+            if variant_id not in market_prices:
+                continue
+
+            ref_price = float(ref_price_info.get("price", 0))
+            market_price = float(market_prices[variant_id].get("price", 0))
+
+            if ref_price <= 0 or market_price <= 0:
+                continue
+
+            expected_price = ref_price * expected_rate
+
+            if expected_price > 0:
+                deviation_percent = abs((market_price - expected_price) / expected_price) * 100
+            else:
+                continue
+
+            if deviation_percent > tolerance_percent:
+                if deviation_percent > 50:
+                    severity = "critical"
+                elif deviation_percent > 30:
+                    severity = "warning"
+                else:
+                    severity = "minor"
+
+                # Trouver le nom du produit
+                product_title = "Produit inconnu"
+                variant_title = ""
+                for pid, pinfo in products_map.items():
+                    for v in pinfo.get("variants", []):
+                        if v.get("id") == variant_id:
+                            product_title = pinfo.get("title", "")
+                            variant_title = v.get("title", "")
+                            break
+
+                anomalies.append({
+                    "type": "cross_market",
+                    "severity": severity,
+                    "product_title": product_title,
+                    "variant_id": variant_id,
+                    "variant_title": variant_title,
+                    "market": market_name,
+                    "currency": market_currency,
+                    "current_price": market_price,
+                    "reference_market": reference_market,
+                    "reference_price": ref_price,
+                    "reference_currency": ref_currency,
+                    "expected_price": round(expected_price, 2),
+                    "exchange_rate": expected_rate,
+                    "deviation_percent": round(deviation_percent, 1),
+                    "suggested_price": round(expected_price, 2),
+                    "description": f"Écart de {round(deviation_percent, 1)}% vs {reference_market} (attendu ~{round(expected_price, 2)} {market_currency}, actuel {market_price} {market_currency})"
+                })
+
+    return anomalies
+
+
+# ========================================
+# NIVEAU 3 - RÉSUMÉ IA CLAUDE
+# ========================================
+
+async def generate_ai_summary(anomalies: List[dict], stats: dict, reference_market: str) -> Optional[str]:
+    """Génère un résumé intelligent via Claude API"""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY not set, skipping AI summary")
+        return None
+
+    # Préparer un résumé des anomalies pour Claude
+    intra_anomalies = [a for a in anomalies if a["type"] == "intra_product"]
+    cross_anomalies = [a for a in anomalies if a["type"] == "cross_market"]
+
+    # Grouper par marché pour les cross-market
+    market_summary = {}
+    for a in cross_anomalies:
+        m = a["market"]
+        if m not in market_summary:
+            market_summary[m] = {"count": 0, "critical": 0, "avg_deviation": 0, "deviations": []}
+        market_summary[m]["count"] += 1
+        if a["severity"] == "critical":
+            market_summary[m]["critical"] += 1
+        market_summary[m]["deviations"].append(a["deviation_percent"])
+
+    for m in market_summary:
+        devs = market_summary[m]["deviations"]
+        market_summary[m]["avg_deviation"] = round(sum(devs) / len(devs), 1) if devs else 0
+        del market_summary[m]["deviations"]
+
+    # Top 10 anomalies critiques pour le contexte
+    top_critical = sorted(anomalies, key=lambda x: -x["deviation_percent"])[:10]
+    top_examples = []
+    for a in top_critical:
+        top_examples.append({
+            "product": a.get("product_title", ""),
+            "variant": a.get("variant_title", ""),
+            "market": a.get("market", ""),
+            "type": a["type"],
+            "deviation": f"{a['deviation_percent']}%",
+            "current_price": f"{a['current_price']} {a.get('currency', '')}",
+            "description": a.get("description", "")
         })
-        setSelectedAnomalies(new Set())
-        // Relancer l'analyse pour voir les changements
-        setTimeout(() => runAnalysis(), 1000)
-      }
-    } catch (error) {
-      console.error('Apply error:', error)
-      setMessage({ type: 'error', text: error.response?.data?.detail || error.message })
-    } finally {
-      setApplying(false)
+
+    prompt = f"""Tu es l'assistant pricing de Luxarmonie, une marque premium de luminaires design.
+Analyse ce rapport de cohérence des prix et donne un résumé actionnable en français.
+
+STATS GLOBALES:
+- Marché de référence: {reference_market}
+- Anomalies intra-produit (taille incohérente): {len(intra_anomalies)}
+- Anomalies cross-marchés: {len(cross_anomalies)}
+- Total: {stats.get('total_anomalies', 0)}
+- Critiques: {stats.get('by_severity', {}).get('critical', 0)}
+- Alertes: {stats.get('by_severity', {}).get('warning', 0)}
+- Mineures: {stats.get('by_severity', {}).get('minor', 0)}
+
+RÉSUMÉ PAR MARCHÉ (top problèmes):
+{str(dict(sorted(market_summary.items(), key=lambda x: -x[1]['count'])[:10]))}
+
+TOP 10 ANOMALIES CRITIQUES:
+{str(top_examples)}
+
+Donne:
+1. Un résumé exécutif (2-3 phrases)
+2. Les marchés les plus problématiques à corriger en priorité
+3. Les types de problèmes récurrents
+4. Des recommandations concrètes
+
+Sois concis, direct et utilise des emojis pour la lisibilité. Réponds en français."""
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 1000,
+                    "messages": [{"role": "user", "content": prompt}]
+                }
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                return data["content"][0]["text"]
+            else:
+                logger.error(f"Claude API error: {response.status_code} - {response.text}")
+                return None
+
+    except Exception as e:
+        logger.error(f"Error calling Claude API: {e}")
+        return None
+
+
+# ========================================
+# ENDPOINTS
+# ========================================
+
+@router.get("/markets")
+async def get_coherence_markets():
+    """Retourne les marchés disponibles pour l'analyse"""
+    if not price_cache.is_loaded:
+        return {"markets": list(COUNTRIES.keys()), "source": "static"}
+
+    markets = []
+    for market_name, market_data in price_cache._cache.items():
+        markets.append({
+            "name": market_name,
+            "currency": market_data.get("currency", "EUR"),
+            "prices_count": len(market_data.get("prices", {})),
+            "has_config": market_name in COUNTRIES
+        })
+
+    markets.sort(key=lambda x: x["name"])
+    return {"markets": markets, "source": "cache"}
+
+
+@router.post("/analyze")
+async def analyze_coherence(request: AnalyzeRequest):
+    """
+    Analyse complète de cohérence des prix.
+    Retourne les anomalies intra-produit et cross-marchés avec noms de produits.
+    """
+    if not price_cache.is_loaded or len(price_cache._cache) == 0:
+        raise HTTPException(status_code=400, detail="Le cache des prix n'est pas chargé.")
+
+    reference_market = request.reference_market
+    if reference_market not in price_cache._cache:
+        raise HTTPException(status_code=400, detail=f"Le marché '{reference_market}' n'existe pas dans le cache.")
+
+    ref_cache = price_cache._cache[reference_market]
+
+    logger.info(f"Starting coherence analysis V2 - ref: {reference_market}, types: {request.analysis_types}")
+
+    # ========================================
+    # CHARGER LES NOMS DE PRODUITS
+    # ========================================
+    logger.info("Loading product names from Shopify...")
+    products_map = {}  # product_id -> {title, variants: [{id, title, sku, price}]}
+
+    try:
+        all_products = await shopify_service.get_all_products(max_products=2000)
+        for product in all_products:
+            pid = product.get("id", "")
+            products_map[pid] = {
+                "title": product.get("title", ""),
+                "handle": product.get("handle", ""),
+                "variants": [
+                    {
+                        "id": v.get("id", ""),
+                        "title": v.get("title", ""),
+                        "sku": v.get("sku", ""),
+                        "price": v.get("price", "0")
+                    }
+                    for v in product.get("variants", [])
+                ]
+            }
+        logger.info(f"Loaded {len(products_map)} products")
+    except Exception as e:
+        logger.error(f"Error loading products: {e}")
+        # Continue sans les noms, c'est pas bloquant
+
+    # ========================================
+    # DÉTERMINER LES MARCHÉS CIBLES
+    # ========================================
+    if request.target_market:
+        target_markets = [request.target_market]
+    else:
+        target_markets = [m for m in price_cache._cache.keys() if m != reference_market]
+
+    # ========================================
+    # LANCER LES ANALYSES
+    # ========================================
+    all_anomalies = []
+
+    # Niveau 1: Intra-produit
+    if "intra_product" in request.analysis_types:
+        logger.info("Running intra-product analysis...")
+
+        # Analyser le marché de référence
+        intra_ref = await analyze_intra_product(products_map, reference_market, ref_cache)
+        all_anomalies.extend(intra_ref)
+
+        # Analyser chaque marché cible
+        for market_name in target_markets:
+            market_data = price_cache._cache.get(market_name)
+            if market_data and market_data.get("prices"):
+                intra_market = await analyze_intra_product(products_map, market_name, market_data)
+                all_anomalies.extend(intra_market)
+
+        logger.info(f"Intra-product: {len([a for a in all_anomalies if a['type'] == 'intra_product'])} anomalies")
+
+    # Niveau 2: Cross-marchés
+    if "cross_market" in request.analysis_types:
+        logger.info("Running cross-market analysis...")
+        cross = await analyze_cross_market(
+            products_map, reference_market, ref_cache,
+            target_markets, request.tolerance_percent
+        )
+        all_anomalies.extend(cross)
+        logger.info(f"Cross-market: {len(cross)} anomalies")
+
+    # ========================================
+    # STATS
+    # ========================================
+    stats = {
+        "total_anomalies": len(all_anomalies),
+        "total_variants_analyzed": len(ref_cache.get("prices", {})),
+        "markets_analyzed": target_markets,
+        "by_type": {
+            "intra_product": len([a for a in all_anomalies if a["type"] == "intra_product"]),
+            "cross_market": len([a for a in all_anomalies if a["type"] == "cross_market"]),
+        },
+        "by_severity": {
+            "critical": len([a for a in all_anomalies if a["severity"] == "critical"]),
+            "warning": len([a for a in all_anomalies if a["severity"] == "warning"]),
+            "minor": len([a for a in all_anomalies if a["severity"] == "minor"]),
+        }
     }
-  }
 
-  // Exporter en CSV
-  const exportCSV = () => {
-    if (!analysis?.anomalies) return
+    # Trier: critiques en premier, puis par écart décroissant
+    severity_order = {"critical": 3, "warning": 2, "minor": 1}
+    all_anomalies.sort(key=lambda x: (-severity_order.get(x["severity"], 0), -x["deviation_percent"]))
 
-    const headers = ['Variant ID', 'Marché Référence', 'Prix Référence', 'Marché Comparé', 'Prix Actuel', 'Prix Attendu', 'Écart %', 'Sévérité']
-    const rows = analysis.anomalies.map(a => [
-      a.variant_id,
-      a.reference_market,
-      `${a.reference_price} ${a.reference_currency}`,
-      a.comparison_market,
-      `${a.actual_price} ${a.market_currency}`,
-      `${a.expected_price} ${a.market_currency}`,
-      `${a.deviation_percent}%`,
-      a.severity
-    ])
+    # ========================================
+    # RÉSUMÉ IA (Niveau 3)
+    # ========================================
+    ai_summary = None
+    if len(all_anomalies) > 0:
+        ai_summary = await generate_ai_summary(all_anomalies, stats, reference_market)
 
-    const csv = [headers, ...rows].map(row => row.join(';')).join('\n')
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `coherence_analysis_${new Date().toISOString().split('T')[0]}.csv`
-    link.click()
-  }
+    logger.info(f"Coherence analysis complete: {stats['total_anomalies']} anomalies")
 
-  const getSeverityColor = (severity) => {
-    switch(severity) {
-      case 'critical': return 'bg-red-100 text-red-700 border-red-200'
-      case 'warning': return 'bg-orange-100 text-orange-700 border-orange-200'
-      case 'minor': return 'bg-yellow-100 text-yellow-700 border-yellow-200'
-      default: return 'bg-gray-100 text-gray-700'
+    return {
+        "stats": stats,
+        "anomalies": all_anomalies[:500],
+        "ai_summary": ai_summary,
+        "reference_market": reference_market,
+        "tolerance_percent": request.tolerance_percent
     }
-  }
 
-  const getSeverityIcon = (severity) => {
-    switch(severity) {
-      case 'critical': return <AlertTriangle className="w-4 h-4 text-red-500" />
-      case 'warning': return <AlertCircle className="w-4 h-4 text-orange-500" />
-      case 'minor': return <TrendingUp className="w-4 h-4 text-yellow-500" />
-      default: return null
-    }
-  }
 
-  return (
-    <div className="p-8">
-      {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-2xl font-semibold tracking-title flex items-center gap-3">
-          <BarChart3 className="w-7 h-7" />
-          Analyse de Cohérence
-        </h1>
-        <p className="text-luxarmonie-gray-500 mt-1">
-          Détectez les incohérences de prix entre vos marchés internationaux
-        </p>
-      </div>
+@router.post("/apply")
+async def apply_corrections(request: ApplyCorrectionsRequest):
+    """Applique les corrections de cohérence sur Shopify"""
+    from app.routers.pricing import apply_psychological_ending, calculate_compare_at
 
-      {/* Messages */}
-      {message && (
-        <div className={`mb-6 p-4 rounded-lg flex items-center gap-2 ${
-          message.type === 'success' ? 'bg-green-50 text-green-700 border border-green-200' :
-          message.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' :
-          'bg-yellow-50 text-yellow-700 border border-yellow-200'
-        }`}>
-          {message.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-          {message.text}
-        </div>
-      )}
+    if request.dry_run:
+        return {
+            "applied": False,
+            "dry_run": True,
+            "would_update": len(request.corrections)
+        }
 
-      {/* Paramètres d'analyse */}
-      <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200 mb-6">
-        <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-          <Filter className="w-5 h-5" />
-          Paramètres d'analyse
-        </h2>
+    # Grouper par marché
+    corrections_by_market = {}
+    for correction in request.corrections:
+        market = correction.get("market")
+        if market not in corrections_by_market:
+            corrections_by_market[market] = []
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-          {/* Marché de référence */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Marché de référence
-            </label>
-            <select
-              value={referenceMarket}
-              onChange={(e) => setReferenceMarket(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-            >
-              {availableMarkets.map(m => (
-                <option key={m.name || m} value={m.name || m}>
-                  {m.name || m} {m.currency ? `(${m.currency})` : ''}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-gray-500 mt-1">
-              Les prix des autres marchés seront comparés à ce marché
-            </p>
-          </div>
+        suggested_price = float(correction.get("suggested_price", 0))
+        final_price = apply_psychological_ending(suggested_price, market)
+        compare_at_raw = calculate_compare_at(final_price, 0.40)
+        compare_at_price = apply_psychological_ending(compare_at_raw, market)
 
-          {/* Tolérance */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Tolérance d'écart (%)
-            </label>
-            <input
-              type="number"
-              value={tolerancePercent}
-              onChange={(e) => setTolerancePercent(parseFloat(e.target.value) || 15)}
-              min="1"
-              max="100"
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Écart acceptable entre prix attendu et prix réel
-            </p>
-          </div>
+        corrections_by_market[market].append({
+            "variant_id": correction.get("variant_id"),
+            "price": final_price,
+            "compare_at_price": compare_at_price
+        })
 
-          {/* Bouton analyse */}
-          <div className="flex items-end">
-            <button
-              onClick={runAnalysis}
-              disabled={analyzing}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
-            >
-              {analyzing ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Analyse en cours...
-                </>
-              ) : (
-                <>
-                  <Search className="w-4 h-4" />
-                  Analyser
-                </>
-              )}
-            </button>
-          </div>
-        </div>
+    results = {"success": [], "errors": [], "updated_count": 0}
+    cache_updates = []
 
-        {/* Info */}
-        <div className="bg-blue-50 rounded-lg p-3 text-sm text-blue-700">
-          <strong>Comment ça marche :</strong> L'analyse compare les prix de chaque variante entre le marché de référence
-          et les autres marchés, en tenant compte des taux de change configurés. Les écarts supérieurs à la tolérance sont signalés.
-        </div>
-      </div>
+    for market, corrections in corrections_by_market.items():
+        try:
+            update_result = await shopify_service.bulk_update_prices(market, corrections)
+            if update_result.get("success"):
+                updated = update_result.get("updated", len(corrections))
+                results["success"].append({"market": market, "updated": updated})
+                results["updated_count"] += updated
+                for corr in corrections:
+                    cache_updates.append({
+                        "market": market,
+                        "variant_id": corr["variant_id"],
+                        "price": corr["price"],
+                        "compare_at_price": corr["compare_at_price"]
+                    })
+            else:
+                results["errors"].append(f"{market}: {update_result.get('error')}")
+        except Exception as e:
+            results["errors"].append(f"{market}: {str(e)}")
 
-      {/* Résultats */}
-      {analysis && (
-        <>
-          {/* Statistiques */}
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-            <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200 text-center">
-              <div className="text-2xl font-bold text-gray-900">{analysis.stats.total_variants_analyzed}</div>
-              <div className="text-xs text-gray-500">Variantes analysées</div>
-            </div>
-            <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200 text-center">
-              <div className="text-2xl font-bold text-gray-900">{analysis.stats.markets_analyzed?.length || 0}</div>
-              <div className="text-xs text-gray-500">Marchés comparés</div>
-            </div>
-            <div className="bg-white rounded-xl p-4 shadow-sm border border-red-200 text-center">
-              <div className="text-2xl font-bold text-red-600">{analysis.stats.by_severity?.critical || 0}</div>
-              <div className="text-xs text-red-500">Critiques</div>
-            </div>
-            <div className="bg-white rounded-xl p-4 shadow-sm border border-orange-200 text-center">
-              <div className="text-2xl font-bold text-orange-600">{analysis.stats.by_severity?.warning || 0}</div>
-              <div className="text-xs text-orange-500">Alertes</div>
-            </div>
-            <div className="bg-white rounded-xl p-4 shadow-sm border border-yellow-200 text-center">
-              <div className="text-2xl font-bold text-yellow-600">{analysis.stats.by_severity?.minor || 0}</div>
-              <div className="text-xs text-yellow-500">Mineurs</div>
-            </div>
-          </div>
+    if cache_updates:
+        price_cache.update_prices(cache_updates, save=True)
 
-          {/* Filtres, sélection et actions */}
-          {analysis.anomalies?.length > 0 && (
-            <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200 mb-4">
-              <div className="flex flex-wrap gap-4 items-center justify-between mb-3">
-                <div className="flex gap-3 items-center">
-                  {/* Filtre sévérité */}
-                  <select
-                    value={severityFilter}
-                    onChange={(e) => setSeverityFilter(e.target.value)}
-                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
-                  >
-                    <option value="all">Toutes sévérités</option>
-                    <option value="critical">Critiques</option>
-                    <option value="warning">Alertes</option>
-                    <option value="minor">Mineurs</option>
-                  </select>
-
-                  {/* Filtre marché */}
-                  <select
-                    value={marketFilter}
-                    onChange={(e) => setMarketFilter(e.target.value)}
-                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm"
-                  >
-                    <option value="all">Tous les marchés</option>
-                    {analysis.stats.markets_analyzed?.map(m => (
-                      <option key={m} value={m}>{m}</option>
-                    ))}
-                  </select>
-
-                  {/* Recherche */}
-                  <div className="relative">
-                    <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
-                    <input
-                      type="text"
-                      placeholder="Rechercher variant ID..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-lg text-sm w-48"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex gap-2">
-                  {/* Export */}
-                  <button
-                    onClick={exportCSV}
-                    className="flex items-center gap-2 px-4 py-1.5 bg-green-100 text-green-700 rounded-lg text-sm hover:bg-green-200"
-                  >
-                    <Download className="w-4 h-4" />
-                    Exporter CSV
-                  </button>
-                </div>
-              </div>
-
-              {/* Barre de sélection et correction */}
-              <div className="flex flex-wrap gap-3 items-center justify-between pt-3 border-t border-gray-200">
-                <div className="flex gap-2 items-center">
-                  <button
-                    onClick={selectAllFiltered}
-                    className="text-xs px-3 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
-                  >
-                    Tout sélectionner ({filteredAnomalies.length})
-                  </button>
-                  {selectedAnomalies.size > 0 && (
-                    <button
-                      onClick={deselectAll}
-                      className="text-xs px-3 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
-                    >
-                      Désélectionner tout
-                    </button>
-                  )}
-                  <span className="text-sm text-gray-500">
-                    {selectedAnomalies.size} sélectionné(s)
-                  </span>
-                </div>
-
-                {/* Bouton Corriger */}
-                <button
-                  onClick={applyCorrections}
-                  disabled={applying || selectedAnomalies.size === 0}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    selectedAnomalies.size > 0
-                      ? 'bg-blue-600 text-white hover:bg-blue-700'
-                      : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                  }`}
-                >
-                  {applying ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Correction en cours...
-                    </>
-                  ) : (
-                    <>
-                      <Check className="w-4 h-4" />
-                      Corriger {selectedAnomalies.size > 0 ? `(${selectedAnomalies.size})` : ''}
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Liste des anomalies */}
-          {filteredAnomalies.length > 0 ? (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="bg-gray-50 border-b border-gray-200">
-                    <tr>
-                      <th className="w-10 py-3 px-2">
-                        <input
-                          type="checkbox"
-                          checked={filteredAnomalies.length > 0 && filteredAnomalies.every(a => selectedAnomalies.has(`${a.variant_id}-${a.comparison_market}`))}
-                          onChange={(e) => e.target.checked ? selectAllFiltered() : deselectAll()}
-                          className="rounded border-gray-300"
-                        />
-                      </th>
-                      <th className="text-left py-3 px-4 font-medium text-gray-700">Sévérité</th>
-                      <th className="text-left py-3 px-4 font-medium text-gray-700">Variant ID</th>
-                      <th className="text-left py-3 px-4 font-medium text-gray-700">Marché</th>
-                      <th className="text-right py-3 px-4 font-medium text-gray-700">Prix actuel</th>
-                      <th className="text-right py-3 px-4 font-medium text-gray-700">Prix suggéré</th>
-                      <th className="text-right py-3 px-4 font-medium text-gray-700">Écart</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredAnomalies.slice(0, 100).map((anomaly, idx) => {
-                      const anomalyKey = `${anomaly.variant_id}-${anomaly.comparison_market}`
-                      const isSelected = selectedAnomalies.has(anomalyKey)
-
-                      return (
-                        <tr key={idx} className={`border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${
-                          isSelected ? 'bg-blue-50' :
-                          anomaly.severity === 'critical' ? 'bg-red-50/50' :
-                          anomaly.severity === 'warning' ? 'bg-orange-50/50' : ''
-                        }`}
-                        onClick={() => toggleSelectAnomaly(anomalyKey)}
-                        >
-                          <td className="py-2 px-2" onClick={(e) => e.stopPropagation()}>
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={() => toggleSelectAnomaly(anomalyKey)}
-                              className="rounded border-gray-300"
-                            />
-                          </td>
-                          <td className="py-2 px-4">
-                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${getSeverityColor(anomaly.severity)}`}>
-                              {getSeverityIcon(anomaly.severity)}
-                              {anomaly.severity}
-                            </span>
-                          </td>
-                          <td className="py-2 px-4 font-mono text-xs truncate max-w-[150px]" title={anomaly.variant_id}>
-                            {anomaly.variant_id.split('/').pop()}
-                          </td>
-                          <td className="py-2 px-4">{anomaly.comparison_market}</td>
-                          <td className="py-2 px-4 text-right font-medium text-gray-500 line-through">
-                            {anomaly.actual_price} {anomaly.market_currency}
-                          </td>
-                          <td className="py-2 px-4 text-right font-medium text-green-600">
-                            {anomaly.suggested_price} {anomaly.market_currency}
-                          </td>
-                          <td className="py-2 px-4 text-right">
-                            <span className={`font-medium ${
-                              anomaly.deviation_percent > 30 ? 'text-red-600' :
-                              anomaly.deviation_percent > 20 ? 'text-orange-600' :
-                              'text-yellow-600'
-                            }`}>
-                              {anomaly.actual_price > anomaly.expected_price ? '+' : '-'}{anomaly.deviation_percent}%
-                            </span>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-
-              {filteredAnomalies.length > 100 && (
-                <div className="p-4 text-center text-sm text-gray-500 border-t border-gray-200">
-                  Affichage limité à 100 lignes. Exportez en CSV pour voir toutes les anomalies.
-                </div>
-              )}
-            </div>
-          ) : analysis.anomalies?.length === 0 ? (
-            <div className="bg-green-50 border border-green-200 rounded-xl p-8 text-center">
-              <CheckCircle className="w-12 h-12 text-green-500 mx-auto mb-4" />
-              <h3 className="text-lg font-semibold text-green-800">Aucune anomalie détectée</h3>
-              <p className="text-green-600 mt-2">
-                Tous les prix sont cohérents avec le marché de référence ({referenceMarket})
-                dans la tolérance de {tolerancePercent}%.
-              </p>
-            </div>
-          ) : null}
-        </>
-      )}
-
-      {/* État initial */}
-      {!analysis && !analyzing && (
-        <div className="bg-gray-50 border border-gray-200 rounded-xl p-8 text-center">
-          <BarChart3 className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-          <h3 className="text-lg font-semibold text-gray-700">Prêt à analyser</h3>
-          <p className="text-gray-500 mt-2">
-            Configurez les paramètres ci-dessus et cliquez sur "Analyser" pour détecter
-            les incohérences de prix entre vos marchés.
-          </p>
-        </div>
-      )}
-    </div>
-  )
-}
-
-export default CoherenceModule
+    return {"applied": True, "results": results}
