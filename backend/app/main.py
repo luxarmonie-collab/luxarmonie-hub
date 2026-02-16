@@ -13,6 +13,7 @@ from app.routers import pricing, products, markets
 from app.routers.cache import router as cache_router
 from app.routers.csv_processor import router as csv_router
 from app.routers.fix_price import router as fix_price_router
+from app.routers.coherence import router as coherence_router
 
 # Services
 from app.services.shopify import ShopifyService
@@ -79,6 +80,7 @@ app.include_router(markets.router, prefix="/api/markets")
 app.include_router(cache_router)  # cache_router a déjà le préfixe /api/cache
 app.include_router(csv_router)    # csv_router a déjà le préfixe /api/csv
 app.include_router(fix_price_router)  # fix_price_router a déjà le préfixe /api/fix-price
+app.include_router(coherence_router)  # coherence_router a le préfixe /api/coherence
 
 
 @app.get("/")
