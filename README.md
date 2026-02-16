@@ -68,11 +68,12 @@ git push origin main
 1. Railway va créer automatiquement un service
 2. Clique sur le service → **Settings** → **Root Directory** → `/backend`
 3. Va dans **Variables** et ajoute :
+4. 
    ```
    SHOPIFY_SHOP_DOMAIN=luxarmonie.myshopify.com
    SHOPIFY_ACCESS_TOKEN=shpat_xxxxx
    ```
-4. Railway va déployer automatiquement
+5. Railway va déployer automatiquement
 
 ### Étape 4 : Configurer le Frontend
 
