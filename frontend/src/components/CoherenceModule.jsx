@@ -127,9 +127,9 @@ function CoherenceModule() {
             </select>
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Marché cible (optionnel)</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Marché à analyser</label>
             <select value={targetMarket} onChange={e => setTargetMarket(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
-              <option value="">Tous les marchés</option>
+              <option value="">Marché de référence</option>
               {availableMarkets.filter(m => (m.name || m) !== referenceMarket).map(m => <option key={m.name || m} value={m.name || m}>{m.name || m}</option>)}
             </select>
           </div>
