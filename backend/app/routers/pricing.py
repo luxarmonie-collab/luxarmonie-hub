@@ -634,7 +634,7 @@ async def preview_pricing(request: PricingPreviewRequest):
                 "markets_with_prices": len(market_prices),
                 "cache_used": cache_used
             },
-            "preview": preview[:1000]  # Limite à 1000 pour l'affichage
+            "preview": preview  # Pas de limite - l'apply en a besoin pour tous les prix
         }
     
     except Exception as e:
