@@ -91,38 +91,45 @@ class ShopifyService:
         logger.info(f"Step 2: Found {len(all_catalogs)} market catalogs")
 
         # ====== ÉTAPE 3 : Fusionner catalogs → markets ======
-        # Construire un mapping market_id -> priceList depuis les catalogs
-        catalog_map_by_id = {}    # market_id -> {priceList, catalogTitle}
-        catalog_map_by_name = {}  # market_name -> {priceList, catalogTitle}
+        # L'API markets ne retourne que le "Global Market" (marché primaire).
+        # Les vrais marchés individuels sont représentés par les catalogues.
+        # On crée un marché pour chaque catalogue qui a une PriceList.
         
+        # D'abord, indexer les marchés existants par nom
+        existing_markets_by_name = {m["name"]: m for m in all_markets}
+        
+        # Pour chaque catalogue, créer un marché s'il n'existe pas déjà
         for catalog in all_catalogs:
             price_list = catalog.get("priceList")
-            if not price_list:
+            catalog_title = catalog.get("title", "").strip()
+            
+            if not catalog_title:
                 continue
             
-            catalog_title = catalog.get("title", "")
-            catalog_markets = catalog.get("markets", {}).get("edges", [])
-            
-            for market_edge in catalog_markets:
-                market_node = market_edge.get("node", {})
-                market_id = market_node.get("id", "")
-                market_name = market_node.get("name", "")
-                
-                if market_id:
-                    catalog_map_by_id[market_id] = price_list
-                if market_name:
-                    catalog_map_by_name[market_name] = price_list
+            if catalog_title in existing_markets_by_name:
+                # Le marché existe déjà (ex: "Global Market"), attacher la PriceList
+                existing_markets_by_name[catalog_title]["priceList"] = price_list
+            else:
+                # Créer un nouveau marché basé sur le catalogue
+                currency = price_list.get("currency", "EUR") if price_list else "EUR"
+                new_market = {
+                    "id": catalog.get("id", ""),
+                    "numericId": catalog.get("id", "").split("/")[-1],
+                    "name": catalog_title,
+                    "handle": catalog_title.lower().replace(" ", "-"),
+                    "enabled": True,
+                    "primary": False,
+                    "currencySettings": {
+                        "baseCurrency": {
+                            "currencyCode": currency
+                        }
+                    },
+                    "priceList": price_list
+                }
+                all_markets.append(new_market)
+                existing_markets_by_name[catalog_title] = new_market
 
-        logger.info(f"Step 3: Catalog map has {len(catalog_map_by_id)} market IDs, {len(catalog_map_by_name)} market names")
-
-        # Attacher les PriceLists aux marchés
-        for market in all_markets:
-            market_id = market.get("id", "")
-            market_name = market.get("name", "")
-            
-            # Priorité : match par ID, puis par nom
-            pl = catalog_map_by_id.get(market_id) or catalog_map_by_name.get(market_name)
-            market["priceList"] = pl
+        logger.info(f"Step 3: After merge, total markets: {len(all_markets)}")
 
         # Log pour debug
         markets_with_pricelist = [m for m in all_markets if m.get("priceList")]
@@ -225,14 +232,6 @@ class ShopifyService:
                             id
                             name
                             currency
-                        }
-                        markets(first: 10) {
-                            edges {
-                                node {
-                                    id
-                                    name
-                                }
-                            }
                         }
                     }
                     cursor
