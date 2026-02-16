@@ -76,8 +76,68 @@ class ShopifyService:
     async def get_all_markets(self) -> List[Dict]:
         """
         Récupère TOUS les marchés Shopify avec leurs PriceLists.
-        Requête hybride: priceList direct + catalogs pour compatibilité.
+        
+        Stratégie en 2 étapes (post-migration Shopify Catalogs) :
+        1. Récupérer les marchés de base via markets query
+        2. Récupérer les catalogues MARKET avec leurs PriceLists via catalogs query
+        3. Fusionner : chaque catalogue est assigné à un marché → on attache la PriceList
         """
+        # ====== ÉTAPE 1 : Récupérer les marchés ======
+        all_markets = await self._fetch_all_markets()
+        logger.info(f"Step 1: Found {len(all_markets)} markets")
+
+        # ====== ÉTAPE 2 : Récupérer les catalogues MARKET ======
+        all_catalogs = await self._fetch_all_catalogs()
+        logger.info(f"Step 2: Found {len(all_catalogs)} market catalogs")
+
+        # ====== ÉTAPE 3 : Fusionner catalogs → markets ======
+        # Construire un mapping market_id -> priceList depuis les catalogs
+        catalog_map_by_id = {}    # market_id -> {priceList, catalogTitle}
+        catalog_map_by_name = {}  # market_name -> {priceList, catalogTitle}
+        
+        for catalog in all_catalogs:
+            price_list = catalog.get("priceList")
+            if not price_list:
+                continue
+            
+            catalog_title = catalog.get("title", "")
+            catalog_markets = catalog.get("markets", {}).get("edges", [])
+            
+            for market_edge in catalog_markets:
+                market_node = market_edge.get("node", {})
+                market_id = market_node.get("id", "")
+                market_name = market_node.get("name", "")
+                
+                if market_id:
+                    catalog_map_by_id[market_id] = price_list
+                if market_name:
+                    catalog_map_by_name[market_name] = price_list
+
+        logger.info(f"Step 3: Catalog map has {len(catalog_map_by_id)} market IDs, {len(catalog_map_by_name)} market names")
+
+        # Attacher les PriceLists aux marchés
+        for market in all_markets:
+            market_id = market.get("id", "")
+            market_name = market.get("name", "")
+            
+            # Priorité : match par ID, puis par nom
+            pl = catalog_map_by_id.get(market_id) or catalog_map_by_name.get(market_name)
+            market["priceList"] = pl
+
+        # Log pour debug
+        markets_with_pricelist = [m for m in all_markets if m.get("priceList")]
+        logger.info(f"Markets with PriceList: {len(markets_with_pricelist)}/{len(all_markets)}")
+
+        for m in all_markets:
+            pl = m.get("priceList")
+            market_name = m.get("name", "Unknown")
+            pl_id = pl.get("id") if pl else "None"
+            logger.info(f"  - {market_name}: priceList={pl_id}")
+
+        return all_markets
+
+    async def _fetch_all_markets(self) -> List[Dict]:
+        """Récupère tous les marchés (infos de base, sans PriceList)"""
         query = """
         query GetMarkets($first: Int!, $after: String) {
             markets(first: $first, after: $after) {
@@ -91,22 +151,6 @@ class ShopifyService:
                         currencySettings {
                             baseCurrency {
                                 currencyCode
-                            }
-                        }
-                        priceList {
-                            id
-                            name
-                            currency
-                        }
-                        catalogs(first: 1) {
-                            edges {
-                                node {
-                                    priceList {
-                                        id
-                                        name
-                                        currency
-                                    }
-                                }
                             }
                         }
                     }
@@ -134,7 +178,6 @@ class ShopifyService:
                 if result and "data" in result and result["data"] and "markets" in result["data"]:
                     markets_data = result["data"]["markets"]
                     if not markets_data:
-                        logger.warning("markets is None in response")
                         has_next = False
                         continue
 
@@ -144,29 +187,18 @@ class ShopifyService:
                     for edge in edges:
                         if not edge:
                             continue
-
                         market = edge.get("node")
                         if not market:
                             continue
 
                         market["numericId"] = market["id"].split("/")[-1]
-
-                        # Priorité: catalogs (nouveau modèle), sinon priceList direct (ancien modèle)
-                        catalogs = market.get("catalogs", {}).get("edges", [])
-                        if catalogs and catalogs[0]["node"].get("priceList"):
-                            market["priceList"] = catalogs[0]["node"]["priceList"]
-                        # sinon garder market["priceList"] tel quel (ancien champ)
-
-                        # Nettoyer le champ catalogs pour pas polluer la suite
-                        market.pop("catalogs", None)
-
                         all_markets.append(market)
                         cursor = edge["cursor"]
 
                     page_info = markets_data.get("pageInfo")
                     has_next = page_info.get("hasNextPage", False) if page_info else False
                 else:
-                    logger.warning(f"No data in result: {result}")
+                    logger.warning(f"No markets data in result: {result}")
                     has_next = False
 
             except Exception as e:
@@ -175,19 +207,87 @@ class ShopifyService:
                 traceback.print_exc()
                 has_next = False
 
-        logger.info(f"Total markets found: {len(all_markets)}")
-
-        # Log pour debug
-        markets_with_pricelist = [m for m in all_markets if m.get("priceList")]
-        logger.info(f"Markets with PriceList: {len(markets_with_pricelist)}/{len(all_markets)}")
-
-        for m in all_markets:
-            pl = m.get("priceList")
-            market_name = m.get("name", "Unknown")
-            pl_id = pl.get("id") if pl else "None"
-            logger.info(f"  - {market_name}: priceList={pl_id}")
-
         return all_markets
+
+    async def _fetch_all_catalogs(self) -> List[Dict]:
+        """
+        Récupère tous les catalogues de type MARKET avec leurs PriceLists et marchés associés.
+        C'est la nouvelle méthode officielle Shopify pour obtenir les PriceLists par marché.
+        """
+        query = """
+        query GetMarketCatalogs($first: Int!, $after: String) {
+            catalogs(first: $first, after: $after, type: MARKET) {
+                edges {
+                    node {
+                        id
+                        title
+                        priceList {
+                            id
+                            name
+                            currency
+                        }
+                        markets(first: 10) {
+                            edges {
+                                node {
+                                    id
+                                    name
+                                }
+                            }
+                        }
+                    }
+                    cursor
+                }
+                pageInfo {
+                    hasNextPage
+                }
+            }
+        }
+        """
+
+        all_catalogs = []
+        has_next = True
+        cursor = None
+
+        while has_next:
+            variables = {"first": 50}
+            if cursor:
+                variables["after"] = cursor
+
+            try:
+                result = await self.execute_query(query, variables)
+
+                if result and "data" in result and result["data"] and "catalogs" in result["data"]:
+                    catalogs_data = result["data"]["catalogs"]
+                    if not catalogs_data:
+                        has_next = False
+                        continue
+
+                    edges = catalogs_data.get("edges") or []
+                    logger.info(f"Found {len(edges)} catalogs in this batch")
+
+                    for edge in edges:
+                        if not edge:
+                            continue
+                        catalog = edge.get("node")
+                        if not catalog:
+                            continue
+
+                        all_catalogs.append(catalog)
+                        cursor = edge["cursor"]
+
+                    page_info = catalogs_data.get("pageInfo")
+                    has_next = page_info.get("hasNextPage", False) if page_info else False
+                else:
+                    logger.warning(f"No catalogs data in result: {result}")
+                    has_next = False
+
+            except Exception as e:
+                logger.error(f"Failed to get catalogs: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                has_next = False
+
+        return all_catalogs
 
     async def _associate_pricelists_to_markets(self, markets: List[Dict]) -> List[Dict]:
         """
