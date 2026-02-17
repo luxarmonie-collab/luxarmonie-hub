@@ -105,10 +105,42 @@ def get_size_from_variant(variant_title: str) -> Tuple[Optional[float], str]:
 # ANALYSE NIVEAU 1 - INTRA-PRODUIT
 # ========================================
 
+def parse_variant_options(variant_title: str) -> dict:
+    """
+    Parse le titre de variante en options séparées.
+    Ex: "Bois marron / 220cm / Blanc chaud 3000K" -> {size: 220, color: "Bois marron", other: "Blanc chaud 3000K"}
+    Ex: "Diamètre 50cm" -> {size: 50, color: "default", other: ""}
+    Ex: "Or / Blanc chaud" -> {size: None, color: "Or", other: "Blanc chaud"}
+    """
+    if not variant_title:
+        return {"size": None, "non_size_key": "default"}
+    
+    parts = [p.strip() for p in variant_title.split("/")]
+    
+    size_val = None
+    non_size_parts = []
+    
+    for part in parts:
+        extracted = extract_size_value(part)
+        if extracted is not None and size_val is None:
+            size_val = extracted
+        else:
+            non_size_parts.append(part.strip())
+    
+    non_size_key = " / ".join(non_size_parts).lower().strip() if non_size_parts else "default"
+    
+    return {"size": size_val, "non_size_key": non_size_key}
+
+
 async def analyze_intra_product(products_map: Dict, market_name: str, market_prices: Dict) -> List[dict]:
     """
     Détecte les incohérences de prix au sein d'un même produit.
-    Ex: 40cm à 150€ et 100cm à 120€ → CRITIQUE
+    
+    Logique : pour chaque produit, on regroupe les variantes par tout SAUF la taille
+    (couleur, température, etc.). Dans chaque groupe, les prix doivent être croissants
+    quand la taille augmente.
+    
+    On retourne aussi les variantes "voisines" pour le contexte.
     """
     anomalies = []
     market_currency = market_prices.get("currency", "EUR") if isinstance(market_prices, dict) else "EUR"
@@ -121,9 +153,8 @@ async def analyze_intra_product(products_map: Dict, market_name: str, market_pri
         if len(variants) < 2:
             continue
 
-        # Grouper les variantes par couleur/type (pour ne comparer que les tailles)
-        # Extraire la partie "couleur" et la partie "taille"
-        size_groups = {}  # color_key -> [(size_val, variant_id, price, variant_title)]
+        # Grouper les variantes par options non-taille
+        size_groups = {}  # non_size_key -> [(size_val, variant_id, price, variant_title)]
 
         for variant in variants:
             variant_id = variant.get("id", "")
@@ -132,7 +163,6 @@ async def analyze_intra_product(products_map: Dict, market_name: str, market_pri
             # Récupérer le prix du marché
             price_info = prices_dict.get(variant_id)
             if not price_info:
-                # Essayer avec le format numérique
                 numeric_id = variant_id.split("/")[-1] if "/" in variant_id else variant_id
                 price_info = prices_dict.get(f"gid://shopify/ProductVariant/{numeric_id}")
                 if not price_info:
@@ -144,41 +174,39 @@ async def analyze_intra_product(products_map: Dict, market_name: str, market_pri
             if price <= 0:
                 continue
 
-            size_val, size_type = get_size_from_variant(variant_title)
-            if size_val is None:
+            parsed = parse_variant_options(variant_title)
+            if parsed["size"] is None:
                 continue
 
-            # Extraire la "couleur" (tout sauf la taille) pour grouper
-            color_key = re.sub(r'\d+\s*(?:cm|mm|m)\b', '', variant_title, flags=re.IGNORECASE).strip()
-            color_key = re.sub(r'diamètre|diametre|longueur|largeur|hauteur', '', color_key, flags=re.IGNORECASE).strip()
-            color_key = re.sub(r'\s+', ' ', color_key).strip(' -/')
-            if not color_key:
-                color_key = "default"
-
-            group_key = f"{size_type}:{color_key.lower()}"
-
+            group_key = parsed["non_size_key"]
             if group_key not in size_groups:
                 size_groups[group_key] = []
-            size_groups[group_key].append((size_val, variant_id, price, variant_title))
+            size_groups[group_key].append((parsed["size"], variant_id, price, variant_title))
 
         # Analyser chaque groupe de tailles
         for group_key, items in size_groups.items():
             if len(items) < 2:
                 continue
 
-            # Trier par taille
+            # Trier par taille croissante
             items.sort(key=lambda x: x[0])
 
-            # Vérifier que le prix est croissant (ou au moins pas décroissant)
+            # Construire le contexte : toutes les variantes du groupe avec leurs prix
+            context_variants = [
+                {"title": title, "size": size, "price": price}
+                for size, vid, price, title in items
+            ]
+
+            # Vérifier que le prix est croissant (ou stable) quand la taille augmente
             for i in range(1, len(items)):
                 prev_size, prev_vid, prev_price, prev_title = items[i - 1]
                 curr_size, curr_vid, curr_price, curr_title = items[i]
 
-                # Si la taille est plus grande mais le prix est PLUS BAS → anomalie
+                # Anomalie : taille plus grande mais prix PLUS BAS
                 if curr_size > prev_size and curr_price < prev_price:
-                    price_diff_pct = abs((curr_price - prev_price) / prev_price) * 100
+                    price_diff = prev_price - curr_price
+                    price_diff_pct = round((price_diff / prev_price) * 100, 1)
 
-                    # Déterminer la sévérité
                     if price_diff_pct > 20:
                         severity = "critical"
                     elif price_diff_pct > 10:
@@ -198,9 +226,11 @@ async def analyze_intra_product(products_map: Dict, market_name: str, market_pri
                         "current_price": curr_price,
                         "reference_variant_title": prev_title,
                         "reference_price": prev_price,
-                        "deviation_percent": round(price_diff_pct, 1),
-                        "suggested_price": round(prev_price * (curr_size / prev_size), 2),
-                        "description": f"'{curr_title}' ({curr_price} {market_currency}) est moins cher que '{prev_title}' ({prev_price} {market_currency}) alors que la taille est plus grande"
+                        "deviation_percent": price_diff_pct,
+                        # Prix suggéré = au minimum le même prix que la taille en dessous
+                        "suggested_price": prev_price,
+                        "description": f"'{curr_title}' ({curr_price} {market_currency}) est moins cher que '{prev_title}' ({prev_price} {market_currency}) alors que la taille est plus grande",
+                        "context_variants": context_variants
                     })
 
     return anomalies
