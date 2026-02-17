@@ -501,7 +501,13 @@ async def analyze_coherence(request: AnalyzeRequest):
 
     try:
         all_products = await shopify_service.get_all_products(max_products=2000)
+        skipped_draft = 0
         for product in all_products:
+            # Ne garder que les produits actifs (pas brouillon/archivé)
+            status = product.get("status", "").upper()
+            if status != "ACTIVE":
+                skipped_draft += 1
+                continue
             pid = product.get("id", "")
             products_map[pid] = {
                 "title": product.get("title", ""),
@@ -516,7 +522,7 @@ async def analyze_coherence(request: AnalyzeRequest):
                     for v in product.get("variants", [])
                 ]
             }
-        logger.info(f"Loaded {len(products_map)} products")
+        logger.info(f"Loaded {len(products_map)} active products (skipped {skipped_draft} draft/archived)")
     except Exception as e:
         logger.error(f"Error loading products: {e}")
         # Continue sans les noms, c'est pas bloquant
@@ -551,6 +557,31 @@ async def analyze_coherence(request: AnalyzeRequest):
             all_anomalies.extend(intra_ref)
 
         logger.info(f"Intra-product: {len([a for a in all_anomalies if a['type'] == 'intra_product'])} anomalies")
+
+    # Enrichir les anomalies intra-produit avec les prix des autres marchés
+    if all_anomalies:
+        other_market_names = [m for m in price_cache._cache.keys()]
+        for anomaly in all_anomalies:
+            if anomaly["type"] != "intra_product":
+                continue
+            vid = anomaly.get("variant_id", "")
+            if not vid:
+                continue
+            market_prices_list = []
+            for mname in other_market_names:
+                mdata = price_cache._cache.get(mname, {})
+                mprices = mdata.get("prices", {})
+                mcurrency = mdata.get("currency", "EUR")
+                price_info = mprices.get(vid)
+                if price_info:
+                    mp = float(price_info.get("price", 0))
+                    if mp > 0:
+                        market_prices_list.append({
+                            "market": mname,
+                            "price": mp,
+                            "currency": mcurrency
+                        })
+            anomaly["other_markets"] = market_prices_list
 
     # Niveau 2: Cross-marchés
     if "cross_market" in request.analysis_types:
