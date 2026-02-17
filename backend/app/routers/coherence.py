@@ -60,6 +60,7 @@ class AnalyzeRequest(BaseModel):
 class ApplyCorrectionsRequest(BaseModel):
     corrections: List[dict]
     dry_run: bool = False
+    apply_all_markets: bool = False  # Si True, corrige aussi sur les autres marchés
 
 
 # ========================================
@@ -223,14 +224,26 @@ async def analyze_intra_product(products_map: Dict, market_name: str, market_pri
             ]
 
             # Vérifier que le prix est croissant (ou stable) quand la taille augmente
-            for i in range(1, len(items)):
-                prev_size, prev_vid, prev_price, prev_title = items[i - 1]
+            # On compare chaque variante avec le PRIX MAX des tailles inférieures
+            max_price_below = 0
+            max_price_vid = items[0][1]
+            max_price_title = items[0][3]
+            max_price_value = items[0][2]
+
+            for i in range(len(items)):
                 curr_size, curr_vid, curr_price, curr_title = items[i]
 
-                # Anomalie : taille plus grande mais prix PLUS BAS
-                if curr_size > prev_size and curr_price < prev_price:
-                    price_diff = prev_price - curr_price
-                    price_diff_pct = round((price_diff / prev_price) * 100, 1)
+                if i == 0:
+                    max_price_below = curr_price
+                    max_price_vid = curr_vid
+                    max_price_title = curr_title
+                    max_price_value = curr_price
+                    continue
+
+                # Anomalie : taille plus grande mais prix PLUS BAS que le max des tailles inférieures
+                if curr_price < max_price_below:
+                    price_diff = max_price_below - curr_price
+                    price_diff_pct = round((price_diff / max_price_below) * 100, 1)
 
                     if price_diff_pct > 20:
                         severity = "critical"
@@ -249,14 +262,21 @@ async def analyze_intra_product(products_map: Dict, market_name: str, market_pri
                         "market": market_name,
                         "currency": market_currency,
                         "current_price": curr_price,
-                        "reference_variant_title": prev_title,
-                        "reference_price": prev_price,
+                        "reference_variant_id": max_price_vid,
+                        "reference_variant_title": max_price_title,
+                        "reference_price": max_price_value,
                         "deviation_percent": price_diff_pct,
-                        # Prix suggéré = au minimum le même prix que la taille en dessous
-                        "suggested_price": prev_price,
-                        "description": f"'{curr_title}' ({curr_price} {market_currency}) est moins cher que '{prev_title}' ({prev_price} {market_currency}) alors que la taille est plus grande",
+                        "suggested_price": max_price_below,
+                        "description": f"'{curr_title}' ({curr_price} {market_currency}) est moins cher que '{max_price_title}' ({max_price_value} {market_currency}) alors que la taille est plus grande",
                         "context_variants": context_variants
                     })
+
+                # Mettre à jour le max pour les prochaines comparaisons
+                if curr_price > max_price_below:
+                    max_price_below = curr_price
+                    max_price_vid = curr_vid
+                    max_price_title = curr_title
+                    max_price_value = curr_price
 
     return anomalies
 
@@ -648,7 +668,10 @@ async def analyze_coherence(request: AnalyzeRequest):
 
 @router.post("/apply")
 async def apply_corrections(request: ApplyCorrectionsRequest):
-    """Applique les corrections de cohérence sur Shopify"""
+    """
+    Applique les corrections de cohérence sur Shopify.
+    Si apply_all_markets=True, corrige aussi la même anomalie sur tous les autres marchés.
+    """
     from app.routers.pricing import apply_psychological_ending, calculate_compare_at
 
     if request.dry_run:
@@ -658,25 +681,92 @@ async def apply_corrections(request: ApplyCorrectionsRequest):
             "would_update": len(request.corrections)
         }
 
-    # Grouper par marché
-    corrections_by_market = {}
+    # Collecter toutes les corrections (originales + autres marchés)
+    all_corrections = []
+
     for correction in request.corrections:
+        variant_id = correction.get("variant_id")
         market = correction.get("market")
+        suggested_price = float(correction.get("suggested_price", 0))
+
+        # Ajouter la correction originale
+        all_corrections.append({
+            "variant_id": variant_id,
+            "market": market,
+            "suggested_price": suggested_price
+        })
+
+        # Si apply_all_markets, propager la correction sur les autres marchés
+        if request.apply_all_markets and variant_id:
+            ref_variant_id = correction.get("reference_variant_id")
+            original_price = float(correction.get("original_price", 0))  # Prix actuel sur le marché d'origine
+
+            for other_market, other_data in price_cache._cache.items():
+                if other_market == market:
+                    continue
+
+                other_prices = other_data.get("prices", {})
+                other_price_info = other_prices.get(variant_id)
+                if not other_price_info:
+                    continue
+
+                other_current_price = float(other_price_info.get("price", 0))
+                if other_current_price <= 0:
+                    continue
+
+                # Stratégie 1 : Si on a un prix custom (l'utilisateur a édité le prix)
+                # On calcule le ratio custom_price / original_price sur le marché d'origine
+                # et on l'applique au prix actuel de l'autre marché
+                if original_price > 0 and suggested_price != original_price:
+                    ratio = suggested_price / original_price
+                    new_other_price = other_current_price * ratio
+                    all_corrections.append({
+                        "variant_id": variant_id,
+                        "market": other_market,
+                        "suggested_price": new_other_price
+                    })
+                    continue
+
+                # Stratégie 2 : Pas de prix custom, vérifier si le même problème existe
+                if ref_variant_id:
+                    ref_price_info = other_prices.get(ref_variant_id)
+                    if ref_price_info:
+                        other_ref_price = float(ref_price_info.get("price", 0))
+                        if other_ref_price > 0 and other_current_price < other_ref_price:
+                            all_corrections.append({
+                                "variant_id": variant_id,
+                                "market": other_market,
+                                "suggested_price": other_ref_price
+                            })
+
+    # Dédupliquer (une seule correction par variant_id + market)
+    seen = set()
+    unique_corrections = []
+    for c in all_corrections:
+        key = f"{c['variant_id']}:{c['market']}"
+        if key not in seen:
+            seen.add(key)
+            unique_corrections.append(c)
+
+    # Grouper par marché et appliquer les terminaisons psychologiques
+    corrections_by_market = {}
+    for correction in unique_corrections:
+        market = correction["market"]
         if market not in corrections_by_market:
             corrections_by_market[market] = []
 
-        suggested_price = float(correction.get("suggested_price", 0))
+        suggested_price = correction["suggested_price"]
         final_price = apply_psychological_ending(suggested_price, market)
         compare_at_raw = calculate_compare_at(final_price, 0.40)
         compare_at_price = apply_psychological_ending(compare_at_raw, market)
 
         corrections_by_market[market].append({
-            "variant_id": correction.get("variant_id"),
+            "variant_id": correction["variant_id"],
             "price": final_price,
             "compare_at_price": compare_at_price
         })
 
-    results = {"success": [], "errors": [], "updated_count": 0}
+    results = {"success": [], "errors": [], "updated_count": 0, "markets_corrected": len(corrections_by_market)}
     cache_updates = []
 
     for market, corrections in corrections_by_market.items():
