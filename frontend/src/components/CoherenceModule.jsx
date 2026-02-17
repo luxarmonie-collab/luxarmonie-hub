@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import {
   BarChart3, AlertTriangle, CheckCircle, Search, Download, Loader2,
   AlertCircle, TrendingUp, Check, Sparkles, Layers, Globe, Filter,
-  ChevronDown, ChevronUp
+  ChevronDown, ChevronUp, ChevronRight, ArrowRight
 } from 'lucide-react'
 import axios from 'axios'
 
@@ -25,6 +25,7 @@ function CoherenceModule() {
   const [selectedAnomalies, setSelectedAnomalies] = useState(new Set())
   const [applying, setApplying] = useState(false)
   const [showAiSummary, setShowAiSummary] = useState(true)
+  const [expandedRows, setExpandedRows] = useState(new Set())
   const [page, setPage] = useState(1)
   const PAGE_SIZE = 50
 
@@ -44,7 +45,7 @@ function CoherenceModule() {
 
   const runAnalysis = async () => {
     try {
-      setAnalyzing(true); setMessage(null); setAnalysis(null); setSelectedAnomalies(new Set()); setPage(1)
+      setAnalyzing(true); setMessage(null); setAnalysis(null); setSelectedAnomalies(new Set()); setExpandedRows(new Set()); setPage(1)
       const r = await axios.post(`${API_URL}/coherence/analyze`, {
         tolerance_percent: tolerancePercent, reference_market: referenceMarket,
         target_market: targetMarket || null, analysis_types: analysisTypes
@@ -80,6 +81,7 @@ function CoherenceModule() {
   const toggleSelect = (key) => { const s = new Set(selectedAnomalies); s.has(key) ? s.delete(key) : s.add(key); setSelectedAnomalies(s) }
   const selectAllFiltered = () => { const s = new Set(selectedAnomalies); filteredAnomalies.forEach(a => s.add(`${a.variant_id}-${a.market}`)); setSelectedAnomalies(s) }
   const deselectAll = () => setSelectedAnomalies(new Set())
+  const toggleExpand = (key) => { const s = new Set(expandedRows); s.has(key) ? s.delete(key) : s.add(key); setExpandedRows(s) }
 
   const applyCorrections = async () => {
     if (selectedAnomalies.size === 0) return
@@ -95,8 +97,8 @@ function CoherenceModule() {
 
   const exportCSV = () => {
     if (!filteredAnomalies.length) return
-    const h = ['Type', 'Sévérité', 'Produit', 'Variante', 'Marché', 'Devise', 'Prix actuel', 'Prix suggéré', 'Écart %', 'Description']
-    const rows = filteredAnomalies.map(a => [a.type === 'intra_product' ? 'Intra-produit' : 'Cross-marché', a.severity, a.product_title || '', a.variant_title || '', a.market, a.currency || '', a.current_price, a.suggested_price, `${a.deviation_percent}%`, a.description || ''])
+    const h = ['Type', 'Sévérité', 'Produit', 'Variante', 'Comparé à', 'Marché', 'Devise', 'Prix actuel', 'Prix variante précédente', 'Écart %', 'Description']
+    const rows = filteredAnomalies.map(a => [a.type === 'intra_product' ? 'Intra-produit' : 'Cross-marché', a.severity, a.product_title || '', a.variant_title || '', a.reference_variant_title || '', a.market, a.currency || '', a.current_price, a.reference_price || '', `${a.deviation_percent}%`, a.description || ''])
     const BOM = '\uFEFF'
     const csv = BOM + [h, ...rows].map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(';')).join('\n')
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
@@ -107,7 +109,6 @@ function CoherenceModule() {
 
   return (
     <div className="max-w-[1400px]">
-      {/* Header */}
       <div className="mb-8">
         <div className="flex items-center gap-3 mb-2">
           <BarChart3 className="w-7 h-7 text-indigo-600" />
@@ -156,15 +157,13 @@ function CoherenceModule() {
         </button>
       </div>
 
-      {/* Message */}
       {message && <div className={`rounded-lg p-4 mb-6 ${message.type === 'success' ? 'bg-green-50 border border-green-200 text-green-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>{message.text}</div>}
 
-      {/* Résultats */}
       {analysis && <>
         {/* Stats */}
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
           <div className="bg-white rounded-xl border border-gray-200 p-4 text-center"><div className="text-2xl font-bold text-gray-900">{(analysis.stats.total_variants_analyzed || 0).toLocaleString()}</div><div className="text-xs text-gray-500 mt-1">Variantes</div></div>
-          <div className="bg-white rounded-xl border border-gray-200 p-4 text-center"><div className="text-2xl font-bold text-gray-900">{(analysis.stats.markets_analyzed?.length || 0)}</div><div className="text-xs text-gray-500 mt-1">Marchés</div></div>
+          <div className="bg-white rounded-xl border border-gray-200 p-4 text-center"><div className="text-2xl font-bold text-gray-900">{(analysis.stats.markets_analyzed?.length || 0) + 1}</div><div className="text-xs text-gray-500 mt-1">Marchés</div></div>
           <div className="bg-white rounded-xl border border-red-200 p-4 text-center"><div className="text-2xl font-bold text-red-600">{analysis.stats.by_severity?.critical || 0}</div><div className="text-xs text-gray-500 mt-1">Critiques</div></div>
           <div className="bg-white rounded-xl border border-orange-200 p-4 text-center"><div className="text-2xl font-bold text-orange-600">{analysis.stats.by_severity?.warning || 0}</div><div className="text-xs text-gray-500 mt-1">Alertes</div></div>
           <div className="bg-white rounded-xl border border-yellow-200 p-4 text-center"><div className="text-2xl font-bold text-yellow-600">{analysis.stats.by_severity?.minor || 0}</div><div className="text-xs text-gray-500 mt-1">Mineurs</div></div>
@@ -229,16 +228,17 @@ function CoherenceModule() {
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
+                    <th className="w-8 py-3 px-1"></th>
                     <th className="w-10 py-3 px-2">
                       <input type="checkbox" checked={paginatedAnomalies.every(a => selectedAnomalies.has(`${a.variant_id}-${a.market}`))} onChange={e => e.target.checked ? selectAllFiltered() : deselectAll()} className="rounded border-gray-300" />
                     </th>
-                    <th className="text-left py-3 px-3 font-medium text-gray-700">Type</th>
                     <th className="text-left py-3 px-3 font-medium text-gray-700">Sévérité</th>
                     <th className="text-left py-3 px-3 font-medium text-gray-700 min-w-[200px]">Produit</th>
-                    <th className="text-left py-3 px-3 font-medium text-gray-700">Variante</th>
-                    <th className="text-left py-3 px-3 font-medium text-gray-700">Marché</th>
-                    <th className="text-right py-3 px-3 font-medium text-gray-700">Prix actuel</th>
-                    <th className="text-right py-3 px-3 font-medium text-gray-700">Prix suggéré</th>
+                    <th className="text-left py-3 px-3 font-medium text-gray-700">Variante (problème)</th>
+                    <th className="text-right py-3 px-3 font-medium text-gray-700">Son prix</th>
+                    <th className="text-center py-3 px-2 font-medium text-gray-700">vs</th>
+                    <th className="text-left py-3 px-3 font-medium text-gray-700">Variante (référence)</th>
+                    <th className="text-right py-3 px-3 font-medium text-gray-700">Son prix</th>
                     <th className="text-right py-3 px-3 font-medium text-gray-700">Écart</th>
                   </tr>
                 </thead>
@@ -246,45 +246,70 @@ function CoherenceModule() {
                   {paginatedAnomalies.map((a, i) => {
                     const k = `${a.variant_id}-${a.market}`
                     const sel = selectedAnomalies.has(k)
+                    const expanded = expandedRows.has(k)
                     return (
-                      <tr key={i} className={`border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${sel ? 'bg-indigo-50' : a.severity === 'critical' ? 'bg-red-50/30' : a.severity === 'warning' ? 'bg-orange-50/30' : ''}`} onClick={() => toggleSelect(k)}>
-                        <td className="py-2.5 px-2" onClick={e => e.stopPropagation()}>
-                          <input type="checkbox" checked={sel} onChange={() => toggleSelect(k)} className="rounded border-gray-300" />
-                        </td>
-                        <td className="py-2.5 px-3">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${a.type === 'intra_product' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
-                            {a.type === 'intra_product' ? <Layers className="w-3 h-3" /> : <Globe className="w-3 h-3" />}
-                            {a.type === 'intra_product' ? 'Taille' : 'Marché'}
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${getSeverityStyle(a.severity)}`}>
-                            {a.severity === 'critical' && <AlertTriangle className="w-3 h-3" />}
-                            {a.severity === 'warning' && <AlertCircle className="w-3 h-3" />}
-                            {a.severity === 'minor' && <TrendingUp className="w-3 h-3" />}
-                            {a.severity}
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3">
-                          <div className="font-medium text-gray-900 truncate max-w-[250px]" title={a.product_title}>{a.product_title || 'Produit inconnu'}</div>
-                        </td>
-                        <td className="py-2.5 px-3 text-gray-600 text-xs">{a.variant_title || a.variant_id?.split('/').pop()}</td>
-                        <td className="py-2.5 px-3 text-gray-700">{a.market}</td>
-                        <td className="py-2.5 px-3 text-right font-medium text-gray-500 line-through">{a.current_price} {a.currency}</td>
-                        <td className="py-2.5 px-3 text-right font-medium text-green-600">{a.suggested_price} {a.currency}</td>
-                        <td className="py-2.5 px-3 text-right">
-                          <span className={`font-semibold ${a.deviation_percent > 50 ? 'text-red-600' : a.deviation_percent > 30 ? 'text-orange-600' : 'text-yellow-600'}`}>
-                            +{a.deviation_percent}%
-                          </span>
-                        </td>
-                      </tr>
+                      <>
+                        <tr key={`row-${i}`} className={`border-b border-gray-100 hover:bg-gray-50 ${sel ? 'bg-indigo-50' : a.severity === 'critical' ? 'bg-red-50/30' : a.severity === 'warning' ? 'bg-orange-50/30' : ''}`}>
+                          <td className="py-2.5 px-1">
+                            {a.context_variants && a.context_variants.length > 0 && (
+                              <button onClick={() => toggleExpand(k)} className="p-0.5 hover:bg-gray-200 rounded">
+                                {expanded ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
+                              </button>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-2" onClick={e => e.stopPropagation()}>
+                            <input type="checkbox" checked={sel} onChange={() => toggleSelect(k)} className="rounded border-gray-300" />
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${getSeverityStyle(a.severity)}`}>
+                              {a.severity === 'critical' && <AlertTriangle className="w-3 h-3" />}
+                              {a.severity === 'warning' && <AlertCircle className="w-3 h-3" />}
+                              {a.severity === 'minor' && <TrendingUp className="w-3 h-3" />}
+                              {a.severity}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <div className="font-medium text-gray-900 truncate max-w-[220px]" title={a.product_title}>{a.product_title || 'Produit inconnu'}</div>
+                          </td>
+                          <td className="py-2.5 px-3 text-sm text-red-700 font-medium">{a.variant_title || '?'}</td>
+                          <td className="py-2.5 px-3 text-right text-sm text-red-600 font-semibold">{a.current_price} {a.currency}</td>
+                          <td className="py-2.5 px-2 text-center text-gray-400 text-xs">devrait être ≥</td>
+                          <td className="py-2.5 px-3 text-sm text-green-700 font-medium">{a.reference_variant_title || '?'}</td>
+                          <td className="py-2.5 px-3 text-right text-sm text-green-600 font-semibold">{a.reference_price} {a.currency}</td>
+                          <td className="py-2.5 px-3 text-right">
+                            <span className={`font-semibold ${a.deviation_percent > 50 ? 'text-red-600' : a.deviation_percent > 30 ? 'text-orange-600' : 'text-yellow-600'}`}>
+                              -{a.deviation_percent}%
+                            </span>
+                          </td>
+                        </tr>
+                        {/* Expanded context row */}
+                        {expanded && a.context_variants && (
+                          <tr key={`ctx-${i}`} className="bg-gray-50 border-b border-gray-200">
+                            <td colSpan={10} className="py-3 px-6">
+                              <div className="text-xs font-semibold text-gray-500 mb-2">Toutes les variantes de ce groupe (triées par taille) :</div>
+                              <div className="flex flex-wrap gap-2">
+                                {a.context_variants.map((cv, ci) => {
+                                  const isProblematic = cv.title === a.variant_title
+                                  const isReference = cv.title === a.reference_variant_title
+                                  return (
+                                    <div key={ci} className={`px-3 py-1.5 rounded-lg text-xs border ${isProblematic ? 'bg-red-100 border-red-300 text-red-800 font-semibold' : isReference ? 'bg-green-100 border-green-300 text-green-800 font-semibold' : 'bg-white border-gray-200 text-gray-700'}`}>
+                                      {cv.title} → <span className="font-mono font-bold">{cv.price} {a.currency}</span>
+                                      {isProblematic && ' ⚠️'}
+                                      {isReference && ' ✓'}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </>
                     )
                   })}
                 </tbody>
               </table>
             </div>
 
-            {/* Pagination */}
             {totalPages > 1 && (
               <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 bg-gray-50">
                 <span className="text-sm text-gray-500">{filteredAnomalies.length} résultats — Page {page}/{totalPages}</span>
@@ -304,19 +329,18 @@ function CoherenceModule() {
           <div className="bg-green-50 border border-green-200 rounded-xl p-8 text-center">
             <CheckCircle className="w-12 h-12 text-green-500 mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-green-800">Aucune anomalie détectée</h3>
-            <p className="text-green-600 mt-2">Tous les prix sont cohérents avec {referenceMarket} dans la tolérance de {tolerancePercent}%.</p>
+            <p className="text-green-600 mt-2">Tous les prix sont cohérents dans la tolérance de {tolerancePercent}%.</p>
           </div>
         ) : (
           <div className="bg-gray-50 border border-gray-200 rounded-xl p-6 text-center text-gray-500">Aucun résultat pour les filtres sélectionnés.</div>
         )}
       </>}
 
-      {/* État initial */}
       {!analysis && !analyzing && (
         <div className="bg-gray-50 border border-gray-200 rounded-xl p-10 text-center">
           <BarChart3 className="w-14 h-14 text-gray-300 mx-auto mb-4" />
           <h3 className="text-lg font-semibold text-gray-600">Prêt à analyser</h3>
-          <p className="text-gray-400 mt-2 max-w-md mx-auto">Configurez les paramètres ci-dessus et cliquez sur "Analyser" pour détecter les incohérences de prix.</p>
+          <p className="text-gray-400 mt-2 max-w-md mx-auto">Configurez les paramètres et cliquez sur "Analyser" pour détecter les incohérences de prix.</p>
         </div>
       )}
     </div>
