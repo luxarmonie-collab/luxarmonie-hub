@@ -7,6 +7,7 @@ Module d'analyse de cohérence des prix V2
 
 import re
 import os
+import json
 import math
 import logging
 import httpx
@@ -19,6 +20,30 @@ from app.config.countries import COUNTRIES
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/coherence", tags=["coherence"])
+
+# ========================================
+# DISMISSED ANOMALIES PERSISTENCE
+# ========================================
+DISMISSED_FILE = "/app/cache/dismissed_anomalies.json"
+
+def _load_dismissed() -> set:
+    """Charge la liste des anomalies ignorées"""
+    try:
+        if os.path.exists(DISMISSED_FILE):
+            with open(DISMISSED_FILE, "r") as f:
+                return set(json.load(f))
+    except Exception as e:
+        logger.error(f"Error loading dismissed: {e}")
+    return set()
+
+def _save_dismissed(dismissed: set):
+    """Sauvegarde la liste des anomalies ignorées"""
+    try:
+        os.makedirs(os.path.dirname(DISMISSED_FILE), exist_ok=True)
+        with open(DISMISSED_FILE, "w") as f:
+            json.dump(list(dismissed), f)
+    except Exception as e:
+        logger.error(f"Error saving dismissed: {e}")
 
 
 # ========================================
@@ -537,11 +562,28 @@ async def analyze_coherence(request: AnalyzeRequest):
         all_anomalies.extend(cross)
         logger.info(f"Cross-market: {len(cross)} anomalies")
 
-    # ========================================
-    # STATS
-    # ========================================
+    # Trier: critiques en premier, puis par écart décroissant
+    severity_order = {"critical": 3, "warning": 2, "minor": 1}
+    all_anomalies.sort(key=lambda x: (-severity_order.get(x["severity"], 0), -x["deviation_percent"]))
+
+    # Filtrer les anomalies déjà ignorées (dismissed)
+    dismissed = _load_dismissed()
+    dismissed_count = 0
+    if dismissed:
+        filtered = []
+        for a in all_anomalies:
+            key = f"{a['variant_id']}:{a.get('market', '')}"
+            if key in dismissed:
+                dismissed_count += 1
+            else:
+                filtered.append(a)
+        all_anomalies = filtered
+        logger.info(f"Filtered {dismissed_count} dismissed anomalies")
+
+    # Recalculer les stats après filtrage
     stats = {
         "total_anomalies": len(all_anomalies),
+        "dismissed_count": dismissed_count,
         "total_variants_analyzed": len(ref_cache.get("prices", {})),
         "markets_analyzed": target_markets,
         "by_type": {
@@ -554,10 +596,6 @@ async def analyze_coherence(request: AnalyzeRequest):
             "minor": len([a for a in all_anomalies if a["severity"] == "minor"]),
         }
     }
-
-    # Trier: critiques en premier, puis par écart décroissant
-    severity_order = {"critical": 3, "warning": 2, "minor": 1}
-    all_anomalies.sort(key=lambda x: (-severity_order.get(x["severity"], 0), -x["deviation_percent"]))
 
     # ========================================
     # RÉSUMÉ IA (Niveau 3)
@@ -633,3 +671,52 @@ async def apply_corrections(request: ApplyCorrectionsRequest):
         price_cache.update_prices(cache_updates, save=True)
 
     return {"applied": True, "results": results}
+
+
+# ========================================
+# ENDPOINTS DISMISS (ignorer anomalies)
+# ========================================
+
+class DismissRequest(BaseModel):
+    keys: List[str]  # Liste de "variant_id:market"
+
+
+@router.post("/dismiss")
+async def dismiss_anomalies(request: DismissRequest):
+    """Marque des anomalies comme vérifiées/ignorées"""
+    dismissed = _load_dismissed()
+    added = 0
+    for key in request.keys:
+        if key not in dismissed:
+            dismissed.add(key)
+            added += 1
+    _save_dismissed(dismissed)
+    logger.info(f"Dismissed {added} anomalies (total: {len(dismissed)})")
+    return {"dismissed": added, "total_dismissed": len(dismissed)}
+
+
+@router.post("/undismiss")
+async def undismiss_anomalies(request: DismissRequest):
+    """Restaure des anomalies précédemment ignorées"""
+    dismissed = _load_dismissed()
+    removed = 0
+    for key in request.keys:
+        if key in dismissed:
+            dismissed.discard(key)
+            removed += 1
+    _save_dismissed(dismissed)
+    return {"restored": removed, "total_dismissed": len(dismissed)}
+
+
+@router.get("/dismissed")
+async def get_dismissed():
+    """Retourne le nombre d'anomalies ignorées"""
+    dismissed = _load_dismissed()
+    return {"total_dismissed": len(dismissed), "keys": list(dismissed)[:100]}
+
+
+@router.delete("/dismissed")
+async def clear_dismissed():
+    """Remet à zéro toutes les anomalies ignorées"""
+    _save_dismissed(set())
+    return {"cleared": True}
