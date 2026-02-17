@@ -311,7 +311,7 @@ function CoherenceModule() {
                           <tr key={`ctx-${i}`} className="bg-gray-50 border-b border-gray-200">
                             <td colSpan={10} className="py-3 px-6">
                               <div className="text-xs font-semibold text-gray-500 mb-2">Toutes les variantes de ce groupe (triées par taille) :</div>
-                              <div className="flex flex-wrap gap-2">
+                              <div className="flex flex-wrap gap-2 mb-3">
                                 {a.context_variants.map((cv, ci) => {
                                   const isProblematic = cv.title === a.variant_title
                                   const isReference = cv.title === a.reference_variant_title
@@ -324,6 +324,19 @@ function CoherenceModule() {
                                   )
                                 })}
                               </div>
+                              {a.other_markets && a.other_markets.length > 0 && (
+                                <>
+                                  <div className="text-xs font-semibold text-gray-500 mb-2">Prix de cette variante sur les autres marchés :</div>
+                                  <div className="flex flex-wrap gap-2">
+                                    {a.other_markets.map((om, oi) => (
+                                      <div key={oi} className={`px-2.5 py-1 rounded text-xs border ${om.market === a.market ? 'bg-blue-100 border-blue-300 text-blue-800 font-semibold' : 'bg-white border-gray-200 text-gray-600'}`}>
+                                        {om.market}: <span className="font-mono font-bold">{om.price} {om.currency}</span>
+                                        {om.market === a.market && ' ← actuel'}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </>
+                              )}
                             </td>
                           </tr>
                         )}
