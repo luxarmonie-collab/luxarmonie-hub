@@ -34,6 +34,7 @@ function FixPriceModule() {
   const [basePriceEur, setBasePriceEur] = useState('')
   const [compareAtPriceEur, setCompareAtPriceEur] = useState('')
   const [fixPreview, setFixPreview] = useState(null)
+  const [excludedMarkets, setExcludedMarkets] = useState(new Set())
   
   // États pour Mode "Copier Variante"
   const [sourceVariant, setSourceVariant] = useState(null)
@@ -135,6 +136,7 @@ function FixPriceModule() {
       })
       
       setFixPreview(response.data)
+      setExcludedMarkets(new Set())
     } catch (error) {
       console.error('Fix preview error:', error)
       setMessage({ type: 'error', text: `Erreur: ${error.response?.data?.detail || error.message}` })
@@ -146,7 +148,16 @@ function FixPriceModule() {
   const handleFixApply = async () => {
     if (!fixPreview) return
     
-    if (!window.confirm(`Vous allez modifier ${fixPreview.summary.total_updates} prix. Continuer ?`)) {
+    // Filtrer les marchés exclus
+    const includedPreview = (fixPreview.preview || []).filter(row => !excludedMarkets.has(row.country))
+    const includedCountries = [...new Set(includedPreview.map(row => row.country))]
+    
+    if (includedCountries.length === 0) {
+      setMessage({ type: 'error', text: 'Aucun marché sélectionné.' })
+      return
+    }
+    
+    if (!window.confirm(`Vous allez modifier ${includedPreview.length} prix sur ${includedCountries.length} marchés. Continuer ?`)) {
       return
     }
     
@@ -157,7 +168,7 @@ function FixPriceModule() {
         variant_ids: selectedVariants.map(v => v.variantId),
         base_price_eur: parseFloat(basePriceEur),
         compare_at_price_eur: compareAtPriceEur ? parseFloat(compareAtPriceEur) : null,
-        countries: ['all']
+        countries: includedCountries
       })
       
       if (response.data.applied) {
@@ -535,7 +546,7 @@ function FixPriceModule() {
                 className="flex items-center gap-2 px-6 py-2 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 disabled:opacity-50"
               >
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-                Appliquer ({fixPreview.summary.total_updates} modifications)
+                Appliquer ({(fixPreview.preview || []).filter(r => !excludedMarkets.has(r.country)).length} modifications)
               </button>
             )}
           </div>
@@ -556,11 +567,11 @@ function FixPriceModule() {
                   <div className="text-xs text-blue-500">Variantes</div>
                 </div>
                 <div className="bg-blue-50 rounded-lg p-3 text-center">
-                  <div className="text-xl font-bold text-blue-600">{fixPreview.summary.countries_count}</div>
+                  <div className="text-xl font-bold text-blue-600">{fixPreview.summary.countries_count - excludedMarkets.size}</div>
                   <div className="text-xs text-blue-500">Marchés</div>
                 </div>
                 <div className="bg-blue-50 rounded-lg p-3 text-center">
-                  <div className="text-xl font-bold text-blue-600">{fixPreview.summary.total_updates}</div>
+                  <div className="text-xl font-bold text-blue-600">{(fixPreview.preview || []).filter(r => !excludedMarkets.has(r.country)).length}</div>
                   <div className="text-xs text-blue-500">Modifications</div>
                 </div>
                 <div className="bg-blue-50 rounded-lg p-3 text-center">
@@ -569,10 +580,23 @@ function FixPriceModule() {
                 </div>
               </div>
 
+              {/* Sélection marchés */}
+              <div className="flex gap-2 items-center mb-3 pb-3 border-b border-gray-100">
+                <button onClick={() => setExcludedMarkets(new Set())} className="text-xs px-3 py-1 bg-gray-100 rounded hover:bg-gray-200">Tout inclure</button>
+                <button onClick={() => {
+                  const allMarkets = new Set((fixPreview.preview || []).map(r => r.country))
+                  setExcludedMarkets(allMarkets)
+                }} className="text-xs px-3 py-1 bg-gray-100 rounded hover:bg-gray-200">Tout exclure</button>
+                {excludedMarkets.size > 0 && <span className="text-xs text-orange-600">{excludedMarkets.size} marché(s) exclu(s)</span>}
+              </div>
+
               <div className="overflow-x-auto max-h-64 overflow-y-auto">
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 sticky top-0">
                     <tr>
+                      <th className="w-8 py-2 px-2">
+                        <input type="checkbox" checked={excludedMarkets.size === 0} onChange={e => e.target.checked ? setExcludedMarkets(new Set()) : setExcludedMarkets(new Set((fixPreview.preview || []).map(r => r.country)))} className="rounded border-gray-300" />
+                      </th>
                       <th className="text-left py-2 px-3">Variante</th>
                       <th className="text-left py-2 px-3">Marché</th>
                       <th className="text-right py-2 px-3">Ancien prix</th>
@@ -581,27 +605,37 @@ function FixPriceModule() {
                     </tr>
                   </thead>
                   <tbody>
-                    {fixPreview.preview?.slice(0, 50).map((row, idx) => (
-                      <tr key={idx} className="border-b border-gray-100">
-                        <td className="py-2 px-3 truncate max-w-[150px]">{row.variant_title}</td>
-                        <td className="py-2 px-3">{row.country}</td>
-                        <td className="py-2 px-3 text-right text-gray-500">
-                          {row.current_price || '-'} {row.currency}
-                        </td>
-                        <td className="py-2 px-3 text-right font-medium text-green-600">
-                          {row.new_price} {row.currency}
-                        </td>
-                        <td className="py-2 px-3 text-right">
-                          {row.price_diff_percent !== null && (
-                            <span className={`px-2 py-0.5 rounded text-xs ${
-                              row.price_diff_percent > 0 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
-                            }`}>
-                              {row.price_diff_percent > 0 ? '+' : ''}{row.price_diff_percent}%
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                    {fixPreview.preview?.map((row, idx) => {
+                      const excluded = excludedMarkets.has(row.country)
+                      return (
+                        <tr key={idx} className={`border-b border-gray-100 ${excluded ? 'opacity-30' : ''}`}>
+                          <td className="py-2 px-2">
+                            <input type="checkbox" checked={!excluded} onChange={() => {
+                              const s = new Set(excludedMarkets)
+                              excluded ? s.delete(row.country) : s.add(row.country)
+                              setExcludedMarkets(s)
+                            }} className="rounded border-gray-300" />
+                          </td>
+                          <td className="py-2 px-3 truncate max-w-[150px]">{row.variant_title}</td>
+                          <td className="py-2 px-3">{row.country}</td>
+                          <td className="py-2 px-3 text-right text-gray-500">
+                            {row.current_price || '-'} {row.currency}
+                          </td>
+                          <td className="py-2 px-3 text-right font-medium text-green-600">
+                            {row.new_price} {row.currency}
+                          </td>
+                          <td className="py-2 px-3 text-right">
+                            {row.price_diff_percent !== null && (
+                              <span className={`px-2 py-0.5 rounded text-xs ${
+                                row.price_diff_percent > 0 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
+                              }`}>
+                                {row.price_diff_percent > 0 ? '+' : ''}{row.price_diff_percent}%
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
