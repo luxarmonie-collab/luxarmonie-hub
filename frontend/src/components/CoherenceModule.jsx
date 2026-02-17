@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import {
   BarChart3, AlertTriangle, CheckCircle, Search, Download, Loader2,
   AlertCircle, TrendingUp, Check, Sparkles, Layers, Globe, Filter,
-  ChevronDown, ChevronUp, ChevronRight, ArrowRight
+  ChevronDown, ChevronUp, ChevronRight, ArrowRight, EyeOff, RotateCcw
 } from 'lucide-react'
 import axios from 'axios'
 
@@ -24,6 +24,7 @@ function CoherenceModule() {
   const [sortBy, setSortBy] = useState('severity')
   const [selectedAnomalies, setSelectedAnomalies] = useState(new Set())
   const [applying, setApplying] = useState(false)
+  const [dismissing, setDismissing] = useState(false)
   const [showAiSummary, setShowAiSummary] = useState(true)
   const [expandedRows, setExpandedRows] = useState(new Set())
   const [page, setPage] = useState(1)
@@ -93,6 +94,25 @@ function CoherenceModule() {
       if (r.data.applied) { setMessage({ type: 'success', text: `${r.data.results.updated_count} prix corrigés !` }); setSelectedAnomalies(new Set()); setTimeout(() => runAnalysis(), 1500) }
     } catch (e) { setMessage({ type: 'error', text: e.response?.data?.detail || e.message }) }
     finally { setApplying(false) }
+  }
+
+  const dismissAnomalies = async () => {
+    if (selectedAnomalies.size === 0) return
+    const keys = (analysis?.anomalies || [])
+      .filter(a => selectedAnomalies.has(`${a.variant_id}-${a.market}`))
+      .map(a => `${a.variant_id}:${a.market}`)
+    if (!window.confirm(`Ignorer ${keys.length} anomalies ? Elles n'apparaîtront plus aux prochaines analyses.`)) return
+    try {
+      setDismissing(true)
+      await axios.post(`${API_URL}/coherence/dismiss`, { keys })
+      // Retirer les dismissed de l'analyse locale
+      const dismissedSet = new Set(keys)
+      const remaining = analysis.anomalies.filter(a => !dismissedSet.has(`${a.variant_id}:${a.market}`))
+      setAnalysis({ ...analysis, anomalies: remaining, stats: { ...analysis.stats, total_anomalies: remaining.length, dismissed_count: (analysis.stats.dismissed_count || 0) + keys.length } })
+      setSelectedAnomalies(new Set())
+      setMessage({ type: 'success', text: `${keys.length} anomalies ignorées.` })
+    } catch (e) { setMessage({ type: 'error', text: e.response?.data?.detail || e.message }) }
+    finally { setDismissing(false) }
   }
 
   const exportCSV = () => {
@@ -167,6 +187,7 @@ function CoherenceModule() {
           <div className="bg-white rounded-xl border border-red-200 p-4 text-center"><div className="text-2xl font-bold text-red-600">{analysis.stats.by_severity?.critical || 0}</div><div className="text-xs text-gray-500 mt-1">Critiques</div></div>
           <div className="bg-white rounded-xl border border-orange-200 p-4 text-center"><div className="text-2xl font-bold text-orange-600">{analysis.stats.by_severity?.warning || 0}</div><div className="text-xs text-gray-500 mt-1">Alertes</div></div>
           <div className="bg-white rounded-xl border border-yellow-200 p-4 text-center"><div className="text-2xl font-bold text-yellow-600">{analysis.stats.by_severity?.minor || 0}</div><div className="text-xs text-gray-500 mt-1">Mineurs</div></div>
+          {(analysis.stats.dismissed_count || 0) > 0 && <div className="bg-white rounded-xl border border-gray-300 p-4 text-center"><div className="text-2xl font-bold text-gray-400">{analysis.stats.dismissed_count}</div><div className="text-xs text-gray-500 mt-1">Ignorées</div></div>}
         </div>
 
         {/* AI Summary */}
@@ -218,6 +239,9 @@ function CoherenceModule() {
             <button onClick={applyCorrections} disabled={applying || selectedAnomalies.size === 0} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium ${selectedAnomalies.size > 0 ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}>
               {applying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Corriger {selectedAnomalies.size > 0 ? `(${selectedAnomalies.size})` : ''}
             </button>
+            <button onClick={dismissAnomalies} disabled={dismissing || selectedAnomalies.size === 0} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium ${selectedAnomalies.size > 0 ? 'bg-gray-600 text-white hover:bg-gray-700' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}>
+              {dismissing ? <Loader2 className="w-4 h-4 animate-spin" /> : <EyeOff className="w-4 h-4" />} Ignorer {selectedAnomalies.size > 0 ? `(${selectedAnomalies.size})` : ''}
+            </button>
           </div>
         </div>
 
@@ -233,7 +257,7 @@ function CoherenceModule() {
                       <input type="checkbox" checked={paginatedAnomalies.every(a => selectedAnomalies.has(`${a.variant_id}-${a.market}`))} onChange={e => e.target.checked ? selectAllFiltered() : deselectAll()} className="rounded border-gray-300" />
                     </th>
                     <th className="text-left py-3 px-3 font-medium text-gray-700">Sévérité</th>
-                    <th className="text-left py-3 px-3 font-medium text-gray-700 min-w-[200px]">Produit</th>
+                    <th className="text-left py-3 px-3 font-medium text-gray-700 min-w-[280px]">Produit</th>
                     <th className="text-left py-3 px-3 font-medium text-gray-700">Variante (problème)</th>
                     <th className="text-right py-3 px-3 font-medium text-gray-700">Son prix</th>
                     <th className="text-center py-3 px-2 font-medium text-gray-700">vs</th>
@@ -269,7 +293,7 @@ function CoherenceModule() {
                             </span>
                           </td>
                           <td className="py-2.5 px-3">
-                            <div className="font-medium text-gray-900 truncate max-w-[220px]" title={a.product_title}>{a.product_title || 'Produit inconnu'}</div>
+                            <div className="font-medium text-gray-900 text-xs leading-tight" title={a.product_title}>{a.product_title || 'Produit inconnu'}</div>
                           </td>
                           <td className="py-2.5 px-3 text-sm text-red-700 font-medium">{a.variant_title || '?'}</td>
                           <td className="py-2.5 px-3 text-right text-sm text-red-600 font-semibold">{a.current_price} {a.currency}</td>
