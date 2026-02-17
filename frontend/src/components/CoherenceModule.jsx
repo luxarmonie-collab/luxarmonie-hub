@@ -24,6 +24,7 @@ function CoherenceModule() {
   const [sortBy, setSortBy] = useState('severity')
   const [selectedAnomalies, setSelectedAnomalies] = useState(new Set())
   const [applying, setApplying] = useState(false)
+  const [applyAllMarkets, setApplyAllMarkets] = useState(true)
   const [dismissing, setDismissing] = useState(false)
   const [showAiSummary, setShowAiSummary] = useState(true)
   const [expandedRows, setExpandedRows] = useState(new Set())
@@ -86,12 +87,29 @@ function CoherenceModule() {
 
   const applyCorrections = async () => {
     if (selectedAnomalies.size === 0) return
-    const corrections = (analysis?.anomalies || []).filter(a => selectedAnomalies.has(`${a.variant_id}-${a.market}`)).map(a => ({ variant_id: a.variant_id, market: a.market, suggested_price: a.suggested_price, currency: a.currency }))
-    if (!window.confirm(`Corriger ${corrections.length} prix ?`)) return
+    const corrections = (analysis?.anomalies || []).filter(a => selectedAnomalies.has(`${a.variant_id}-${a.market}`)).map(a => ({
+      variant_id: a.variant_id,
+      market: a.market,
+      suggested_price: a.suggested_price,
+      original_price: a.current_price,
+      currency: a.currency,
+      reference_variant_id: a.reference_variant_id || null,
+      reference_variant_title: a.reference_variant_title || null
+    }))
+    const msg = applyAllMarkets
+      ? `Corriger ${corrections.length} prix sur TOUS les marchés concernés ?`
+      : `Corriger ${corrections.length} prix (marché actuel uniquement) ?`
+    if (!window.confirm(msg)) return
     try {
       setApplying(true)
-      const r = await axios.post(`${API_URL}/coherence/apply`, { corrections, dry_run: false })
-      if (r.data.applied) { setMessage({ type: 'success', text: `${r.data.results.updated_count} prix corrigés !` }); setSelectedAnomalies(new Set()); setTimeout(() => runAnalysis(), 1500) }
+      const r = await axios.post(`${API_URL}/coherence/apply`, { corrections, dry_run: false, apply_all_markets: applyAllMarkets })
+      const count = r.data.results.updated_count
+      const markets = r.data.results.markets_corrected || 1
+      if (r.data.applied) {
+        setMessage({ type: 'success', text: `${count} prix corrigés sur ${markets} marché(s) !` })
+        setSelectedAnomalies(new Set())
+        setTimeout(() => runAnalysis(), 1500)
+      }
     } catch (e) { setMessage({ type: 'error', text: e.response?.data?.detail || e.message }) }
     finally { setApplying(false) }
   }
@@ -236,9 +254,15 @@ function CoherenceModule() {
               {selectedAnomalies.size > 0 && <button onClick={deselectAll} className="text-xs px-3 py-1 bg-gray-100 rounded hover:bg-gray-200">Désélectionner</button>}
               <span className="text-sm text-gray-500">{selectedAnomalies.size} sélectionné(s)</span>
             </div>
-            <button onClick={applyCorrections} disabled={applying || selectedAnomalies.size === 0} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium ${selectedAnomalies.size > 0 ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}>
-              {applying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Corriger {selectedAnomalies.size > 0 ? `(${selectedAnomalies.size})` : ''}
-            </button>
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+                <input type="checkbox" checked={applyAllMarkets} onChange={e => setApplyAllMarkets(e.target.checked)} className="rounded border-gray-300" />
+                <Globe className="w-3.5 h-3.5 text-blue-500" /> Tous les marchés
+              </label>
+              <button onClick={applyCorrections} disabled={applying || selectedAnomalies.size === 0} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium ${selectedAnomalies.size > 0 ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}>
+                {applying ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Corriger {selectedAnomalies.size > 0 ? `(${selectedAnomalies.size})` : ''}
+              </button>
+            </div>
             <button onClick={dismissAnomalies} disabled={dismissing || selectedAnomalies.size === 0} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium ${selectedAnomalies.size > 0 ? 'bg-gray-600 text-white hover:bg-gray-700' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}`}>
               {dismissing ? <Loader2 className="w-4 h-4 animate-spin" /> : <EyeOff className="w-4 h-4" />} Ignorer {selectedAnomalies.size > 0 ? `(${selectedAnomalies.size})` : ''}
             </button>
@@ -263,7 +287,7 @@ function CoherenceModule() {
                     <th className="text-center py-3 px-2 font-medium text-gray-700">vs</th>
                     <th className="text-left py-3 px-3 font-medium text-gray-700">Variante (référence)</th>
                     <th className="text-right py-3 px-3 font-medium text-gray-700">Son prix</th>
-                    <th className="text-right py-3 px-3 font-medium text-gray-700">Écart</th>
+                    <th className="text-right py-3 px-3 font-medium text-gray-700">Nouveau prix</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -301,9 +325,23 @@ function CoherenceModule() {
                           <td className="py-2.5 px-3 text-sm text-green-700 font-medium">{a.reference_variant_title || '?'}</td>
                           <td className="py-2.5 px-3 text-right text-sm text-green-600 font-semibold">{a.reference_price} {a.currency}</td>
                           <td className="py-2.5 px-3 text-right">
-                            <span className={`font-semibold ${a.deviation_percent > 50 ? 'text-red-600' : a.deviation_percent > 30 ? 'text-orange-600' : 'text-yellow-600'}`}>
-                              -{a.deviation_percent}%
-                            </span>
+                            <input
+                              type="number"
+                              value={a._custom_price ?? a.suggested_price}
+                              onChange={e => {
+                                const val = parseFloat(e.target.value)
+                                if (!isNaN(val) && val > 0) {
+                                  const updated = analysis.anomalies.map(an =>
+                                    an.variant_id === a.variant_id && an.market === a.market
+                                      ? { ...an, _custom_price: val, suggested_price: val }
+                                      : an
+                                  )
+                                  setAnalysis({ ...analysis, anomalies: updated })
+                                }
+                              }}
+                              onClick={e => e.stopPropagation()}
+                              className="w-24 px-2 py-1 text-right text-sm border border-gray-300 rounded focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                            />
                           </td>
                         </tr>
                         {/* Expanded context row */}
