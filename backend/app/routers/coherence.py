@@ -281,6 +281,13 @@ async def analyze_cross_market(
     ref_prices = ref_cache.get("prices", {})
     ref_currency = ref_cache.get("currency", "EUR")
 
+    # Index rapide variant_id -> (product_title, variant_title)
+    variant_index = {}
+    for pid, pinfo in products_map.items():
+        ptitle = pinfo.get("title", "")
+        for v in pinfo.get("variants", []):
+            variant_index[v.get("id", "")] = (ptitle, v.get("title", ""))
+
     for market_name in target_markets:
         if market_name == reference_market:
             continue
@@ -322,33 +329,26 @@ async def analyze_cross_market(
                 else:
                     severity = "minor"
 
-                # Trouver le nom du produit
-                product_title = "Produit inconnu"
-                variant_title = ""
-                for pid, pinfo in products_map.items():
-                    for v in pinfo.get("variants", []):
-                        if v.get("id") == variant_id:
-                            product_title = pinfo.get("title", "")
-                            variant_title = v.get("title", "")
-                            break
+                # Trouver le nom du produit via l'index
+                product_title, variant_title = variant_index.get(variant_id, ("Produit inconnu", ""))
 
                 anomalies.append({
                     "type": "cross_market",
                     "severity": severity,
                     "product_title": product_title,
                     "variant_id": variant_id,
-                    "variant_title": variant_title,
+                    "variant_title": f"{variant_title} ({market_name})",
                     "market": market_name,
                     "currency": market_currency,
                     "current_price": market_price,
-                    "reference_market": reference_market,
+                    "reference_variant_title": f"{variant_title} ({reference_market})",
                     "reference_price": ref_price,
                     "reference_currency": ref_currency,
                     "expected_price": round(expected_price, 2),
                     "exchange_rate": expected_rate,
                     "deviation_percent": round(deviation_percent, 1),
                     "suggested_price": round(expected_price, 2),
-                    "description": f"Écart de {round(deviation_percent, 1)}% vs {reference_market} (attendu ~{round(expected_price, 2)} {market_currency}, actuel {market_price} {market_currency})"
+                    "description": f"{market_name}: {market_price} {market_currency} vs attendu {round(expected_price, 2)} {market_currency} (ref {reference_market}: {ref_price} {ref_currency} × taux {expected_rate})"
                 })
 
     return anomalies
@@ -608,7 +608,7 @@ async def analyze_coherence(request: AnalyzeRequest):
 
     return {
         "stats": stats,
-        "anomalies": all_anomalies[:500],
+        "anomalies": all_anomalies,
         "ai_summary": ai_summary,
         "reference_market": reference_market,
         "tolerance_percent": request.tolerance_percent
