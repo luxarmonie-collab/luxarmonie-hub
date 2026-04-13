@@ -189,6 +189,22 @@ COUNTRIES = {
         "exchange_rate": 120,
         "culture": "low-context"
     },
+    "Bulgarie": {
+        "currency": "EUR",
+        "ending": "99",
+        "vat": 0.20,
+        "adjustment": "vat",
+        "exchange_rate": 1,
+        "culture": "low-context"
+    },
+    "Roumanie": {
+        "currency": "EUR",
+        "ending": "99",
+        "vat": 0.19,
+        "adjustment": "vat",
+        "exchange_rate": 1,
+        "culture": "low-context"
+    },
     "Suisse": {
         "currency": "CHF",
         "ending": "95",
@@ -429,6 +445,30 @@ COUNTRIES = {
     },
     
     # === ASIE-PACIFIQUE ===
+    "Japon": {
+        "currency": "JPY",
+        "ending": "000",
+        "vat": 0.10,
+        "adjustment": "vat",
+        "exchange_rate": 186.50,
+        "culture": "high-context"
+    },
+    "Corée du Sud": {
+        "currency": "KRW",
+        "ending": "000",
+        "vat": 0.10,
+        "adjustment": "vat",
+        "exchange_rate": 1737.00,
+        "culture": "high-context"
+    },
+    "Pakistan": {
+        "currency": "EUR",
+        "ending": "00",
+        "vat": 0,
+        "adjustment": "minus_10",
+        "exchange_rate": 1,
+        "culture": "high-context"
+    },
     "Australie": {
         "currency": "AUD",
         "ending": "99",
@@ -491,9 +531,9 @@ COUNTRIES = {
 
 # Devises qui n'ont pas de décimales
 NO_DECIMAL_CURRENCIES = [
-    "HUF", "CZK", "RSD", "CLP", "COP", "PYG", 
-    "SAR", "QAR", "AED", "DKK", "SEK", "NOK", 
-    "HKD", "CRC", "UYU", "DOP"
+    "HUF", "CZK", "RSD", "CLP", "COP", "PYG",
+    "SAR", "QAR", "AED", "DKK", "SEK", "NOK",
+    "HKD", "CRC", "UYU", "DOP", "JPY", "KRW"
 ]
 
 def get_country_config(country_name: str) -> dict:
