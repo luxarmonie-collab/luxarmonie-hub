@@ -138,7 +138,7 @@ COUNTRIES = {
         "ending": "kr",
         "vat": 0.25,
         "adjustment": "vat",
-        "exchange_rate": 7.46,
+        "exchange_rate": 7.60,
         "culture": "low-context"
     },
     "Suède": {
@@ -146,7 +146,7 @@ COUNTRIES = {
         "ending": "kr",
         "vat": 0.25,
         "adjustment": "vat",
-        "exchange_rate": 11.20,
+        "exchange_rate": 11.50,
         "culture": "low-context"
     },
     "Norvège": {
@@ -154,7 +154,7 @@ COUNTRIES = {
         "ending": "00",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 11.80,
+        "exchange_rate": 12.00,
         "culture": "low-context"
     },
     "Hongrie": {
@@ -170,7 +170,7 @@ COUNTRIES = {
         "ending": "99",
         "vat": 0.23,
         "adjustment": "vat",
-        "exchange_rate": 4.28,
+        "exchange_rate": 4.50,
         "culture": "low-context"
     },
     "République tchèque": {
@@ -178,7 +178,7 @@ COUNTRIES = {
         "ending": "990",
         "vat": 0.21,
         "adjustment": "vat",
-        "exchange_rate": 25.10,
+        "exchange_rate": 25.50,
         "culture": "low-context"
     },
     "Serbie": {
@@ -186,7 +186,7 @@ COUNTRIES = {
         "ending": "990",
         "vat": 0.21,
         "adjustment": "vat",
-        "exchange_rate": 117,
+        "exchange_rate": 120,
         "culture": "low-context"
     },
     "Suisse": {
@@ -212,7 +212,7 @@ COUNTRIES = {
         "ending": "99",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 1.16,
+        "exchange_rate": 1.20,
         "culture": "low-context"
     },
     "Canada": {
@@ -220,7 +220,7 @@ COUNTRIES = {
         "ending": "99",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 1.63,
+        "exchange_rate": 1.60,
         "culture": "low-context"
     },
     "Mexique": {
@@ -228,7 +228,7 @@ COUNTRIES = {
         "ending": "99",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 23.00,
+        "exchange_rate": 22.00,
         "culture": "low-context"
     },
     
@@ -238,15 +238,15 @@ COUNTRIES = {
         "ending": "00",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 5.80,
+        "exchange_rate": 6.45,
         "culture": "high-context"
     },
     "Argentine": {
-        "currency": "EUR",
+        "currency": "ARS",
         "ending": "00",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 1,
+        "exchange_rate": 1375,
         "culture": "high-context"
     },
     "Chili": {
@@ -262,7 +262,7 @@ COUNTRIES = {
         "ending": "000",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 4900,
+        "exchange_rate": 4780,
         "culture": "low-context"
     },
     "Paraguay": {
@@ -302,7 +302,7 @@ COUNTRIES = {
         "ending": "00",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 50.00,
+        "exchange_rate": 48.00,
         "culture": "high-context"
     },
     "Costa Rica": {
@@ -360,7 +360,7 @@ COUNTRIES = {
         "ending": "9_int",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 4.35,
+        "exchange_rate": 4.50,
         "culture": "high-context"
     },
     "Émirats Arabes Unis": {
@@ -368,7 +368,7 @@ COUNTRIES = {
         "ending": "9_int",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 4.26,
+        "exchange_rate": 4.30,
         "culture": "high-context"
     },
     "Qatar": {
@@ -376,7 +376,7 @@ COUNTRIES = {
         "ending": "9_int",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 4.22,
+        "exchange_rate": 4.30,
         "culture": "high-context"
     },
     "Bahreïn": {
@@ -434,7 +434,7 @@ COUNTRIES = {
         "ending": "99",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 1.76,
+        "exchange_rate": 1.80,
         "culture": "low-context"
     },
     "Nouvelle Zélande": {
@@ -474,17 +474,17 @@ COUNTRIES = {
         "ending": "99",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 40.00,
+        "exchange_rate": 46.50,
         "culture": "low-context"
     },
-    
+
     # === AFRIQUE ===
     "Afrique du Sud": {
-        "currency": "EUR",
-        "ending": "00",
+        "currency": "ZAR",
+        "ending": "9_int",
         "vat": 0,
         "adjustment": "minus_10",
-        "exchange_rate": 1,
+        "exchange_rate": 22.00,
         "culture": "high-context"
     },
 }
