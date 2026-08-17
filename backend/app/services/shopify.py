@@ -8,6 +8,8 @@ import os
 from typing import List, Dict, Optional
 import logging
 
+from app.config.countries import COUNTRIES
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -981,7 +983,51 @@ class ShopifyService:
         price_list = target_market.get("priceList")
         if not price_list:
             return {"success": False, "error": f"Market '{market_name}' has no PriceList"}
-        
+
+        # ─────────────────────────────────────────────────────────────────────
+        # GARDE-FOU DEVISE — bloquant (Leo, 2026-08-17)
+        # Tickets Paul #4175 / #4176 / #4306.
+        #
+        # Le montant écrit ici a été calculé en amont avec l'exchange_rate de
+        # countries.py, mais il est publié dans une price list dont la devise est
+        # fixée côté Shopify. Quand les deux divergent, on écrit un montant
+        # converti sous un libellé de devise faux.
+        #
+        # Preuve (mesure live du 2026-08-17, 57 catalogs MARKET) :
+        #   Afrique du Sud  config=ZAR fx=22     price list=EUR  ->    +2 636 %
+        #   Turquie         config=TRY fx=46.5   price list=EUR  ->    +5 029 %
+        #   Argentine       config=ARS fx=1375   price list=EUR  ->  +170 868 %
+        #
+        # Calibrage : 3 marchés concernés sur 50 comparables (6 %). Les 47 autres
+        # passent. Un garde-fou qui bloquerait le cas normal ne protégerait de rien.
+        #
+        # Famille "fiabilité de la donnée" => bloquant, pas informatif.
+        # Levée du blocage = corriger countries.py OU la devise de la price list,
+        # PAS retirer ce garde-fou.
+        # ─────────────────────────────────────────────────────────────────────
+        config_currency = (COUNTRIES.get(market_name) or {}).get("currency")
+        list_currency = price_list.get("currency")
+        if config_currency and list_currency and config_currency != list_currency:
+            exchange_rate = (COUNTRIES.get(market_name) or {}).get("exchange_rate", 1)
+            error_msg = (
+                f"ÉCRITURE BLOQUÉE — incohérence de devise sur '{market_name}' : "
+                f"countries.py déclare {config_currency} (exchange_rate {exchange_rate}) "
+                f"alors que la price list Shopify est en {list_currency}. "
+                f"Appliquer écrirait des montants x{exchange_rate} sous un libellé "
+                f"{list_currency}. {len(updates)} écriture(s) annulée(s). "
+                f"Corriger countries.py ou la devise de la price list avant de rejouer."
+            )
+            logger.error(error_msg)
+            return {
+                "success": False,
+                "error": error_msg,
+                "blocked_by": "currency_mismatch_guard",
+                "market": market_name,
+                "config_currency": config_currency,
+                "price_list_currency": list_currency,
+                "skipped_updates": len(updates),
+            }
+
         # Formater les updates
         price_updates = []
         for update in updates:

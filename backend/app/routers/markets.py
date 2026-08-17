@@ -56,7 +56,15 @@ async def get_markets():
                 "handle": market.get("handle"),
                 "enabled": market.get("enabled", True),
                 "primary": market.get("primary", False),
-                "shopifyCurrency": market.get("currencySettings", {}).get("baseCurrency", {}).get("currencyCode"),
+                # Leo 2026-08-17 : certains marchés Shopify renvoient currencySettings=null
+                # (clé présente mais valeur None) -> le défaut de .get() ne s'applique pas et
+                # le chaînage levait "'NoneType' object has no attribute 'get'".
+                # Résultat : GET /api/markets/ répondait 500 sur TOUT le catalogue, donc plus
+                # aucun moyen de comparer devise config vs devise price list depuis l'API.
+                "shopifyCurrency": (
+                    (market.get("currencySettings") or {}).get("baseCurrency") or {}
+                ).get("currencyCode"),
+                "priceListCurrency": (market.get("priceList") or {}).get("currency"),
                 "config": {
                     "currency": config["currency"] if config else None,
                     "ending": config["ending"] if config else "99",
@@ -94,6 +102,74 @@ async def get_countries_config():
         "total": len(countries),
         "countries": countries
     }
+
+
+@router.get("/currency-check")
+async def currency_check():
+    """
+    Contrôle read-only : compare, marché par marché, la devise déclarée dans
+    countries.py à la devise réelle de la price list Shopify.
+
+    Aucune écriture. Sert à savoir AVANT un apply quels marchés sont bloqués par
+    le garde-fou devise de shopify_service.bulk_update_prices.
+
+    Trois familles remontées :
+      - blocked      : devise config != devise price list -> écriture refusée
+      - unreachable  : marché configuré sans catalog/price list live -> apply sans effet
+      - ok           : les deux devises concordent
+    """
+    try:
+        markets = await shopify_service.get_all_markets()
+
+        live_names = set()
+        blocked, ok = [], []
+
+        for market in markets:
+            name = market.get("name")
+            live_names.add(name)
+            price_list = market.get("priceList") or {}
+            list_currency = price_list.get("currency")
+            config = COUNTRIES.get(name)
+
+            if not config or not list_currency:
+                continue
+
+            entry = {
+                "market": name,
+                "config_currency": config.get("currency"),
+                "price_list_currency": list_currency,
+                "exchange_rate": config.get("exchange_rate"),
+            }
+            if config.get("currency") != list_currency:
+                entry["impact"] = (
+                    f"un apply écrirait base x{config.get('exchange_rate')} "
+                    f"sous un libellé {list_currency}"
+                )
+                blocked.append(entry)
+            else:
+                ok.append(entry)
+
+        unreachable = [
+            {"market": name, "config_currency": cfg.get("currency"),
+             "reason": "aucun catalog/price list live à ce nom exact — apply sans effet"}
+            for name, cfg in COUNTRIES.items() if name not in live_names
+        ]
+
+        return {
+            "success": True,
+            "summary": {
+                "markets_live": len(live_names),
+                "configured": len(COUNTRIES),
+                "ok": len(ok),
+                "blocked": len(blocked),
+                "unreachable": len(unreachable),
+            },
+            "blocked": blocked,
+            "unreachable": unreachable,
+            "ok": [e["market"] for e in ok],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{market_name}")
