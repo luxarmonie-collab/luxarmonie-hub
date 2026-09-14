@@ -13,6 +13,8 @@ import random
 import io
 import logging
 
+from app.config.countries import COUNTRIES, apply_ending, is_known_country
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/csv", tags=["csv"])
@@ -64,8 +66,19 @@ def round_kr(price: float) -> float:
     return float(round(price / 5) * 5)
 
 
-# Mapping pays → fonction
-COUNTRY_ROUNDING = {
+# Mapping NOM LIVE SHOPIFY -> fonction d'arrondi.
+#
+# Leo 2026-09-14 — ce module est le seul du backend dont les clés sont les noms
+# de marché tels que Matrixify les écrit en en-tête de colonne
+# ("Price / <nom du marché>"), et non les clés canoniques de countries.py.
+# D'où des entrées introuvables ailleurs : 'Nouvelle', 'République Dominique',
+# 'sal', 'Autres' — les noms réellement configurés côté Shopify.
+# On la garde donc comme COUCHE DE COMPATIBILITÉ des noms live, mais elle n'est
+# plus la source de vérité : get_rounding_function() consulte d'abord
+# countries.py. Mesure du 14/09 : 15 des 62 pays configurés manquaient ici et
+# recevaient donc .99 par défaut, dont Japon (JPY) et Corée du Sud (KRW) qui
+# n'ont pas de décimale — le CSV exporté sortait « 22937.99 » en yens.
+COUNTRY_ROUNDING_LIVE_NAMES = {
     # .99
     'France': round_99, 'USA': round_99, 'UK': round_99, 'Canada': round_99,
     'Australie': round_99, 'Nouvelle': round_99, 'Belgique': round_99,
@@ -100,7 +113,35 @@ COUNTRY_ROUNDING = {
 }
 
 def get_rounding_function(country: str):
-    return COUNTRY_ROUNDING.get(country, round_99)
+    """
+    Fonction d'arrondi pour un nom de marché issu d'un en-tête de colonne CSV.
+
+    Ordre de résolution, du plus fiable au moins fiable :
+      1. countries.py (source unique) via resolve_country, qui tolère accents,
+         casse et ponctuation — couvre les 62 pays configurés.
+      2. table de compatibilité des noms live Shopify ci-dessus, pour les
+         marchés qui n'ont pas d'équivalent configuré ('sal', 'Autres'...).
+      3. .99 par défaut, mais BRUYAMMENT : le nom est loggé en warning.
+
+    Le 3e cas était auparavant muet (`COUNTRY_ROUNDING.get(country, round_99)`),
+    et c'est lui qui a fait sortir des yens et des wons avec des centimes
+    pendant des mois sans que rien ne le signale. Un repli qui ne se voit pas
+    n'est pas un repli, c'est un bug silencieux.
+    """
+    if is_known_country(country):
+        return lambda price: apply_ending(price, country)
+
+    local = COUNTRY_ROUNDING_LIVE_NAMES.get(country)
+    if local:
+        return local
+
+    logger.warning(
+        "get_rounding_function : marché '%s' inconnu de countries.py ET de la "
+        "table des noms live -> arrondi .99 par défaut. Si cette colonne CSV "
+        "correspond à un vrai marché, l'ajouter à COUNTRIES.",
+        country,
+    )
+    return round_99
 
 
 def detect_csv_format(df: pd.DataFrame) -> str:
@@ -397,7 +438,7 @@ async def csv_info():
     """Infos sur le module CSV"""
     return {
         "module": "CSV Price Modifier",
-        "supported_countries": len(COUNTRY_ROUNDING),
+        "supported_countries": len(COUNTRIES),
         "output_format": "Matrixify compatible",
         "features": [
             "Ajustement global (+/- %)",

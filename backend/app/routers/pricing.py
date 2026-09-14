@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from app.services.shopify import shopify_service
 from app.services.pricing_engine import pricing_engine, PricingOperation
 from app.services.price_cache import price_cache
-from app.config.countries import COUNTRIES, get_all_countries
+from app.config.countries import COUNTRIES, get_all_countries, apply_ending
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
@@ -131,119 +131,44 @@ def format_price_for_country(price: float, country: str) -> str:
         return f"{price:.2f}"
 
 
-# Mapping des pays vers leur fonction de terminaison
-COUNTRY_ROUNDING = {
-    # .99
-    'France': round_99,
-    'USA': round_99,
-    'UK': round_99,
-    'Canada': round_99,
-    'Australie': round_99,
-    'Nouvelle Zelande': round_99,
-    'Nouvelle-Zélande': round_99,
-    'Belgique': round_99,
-    'Espagne': round_99,
-    'Pays-Bas': round_99,
-    'Luxembourg': round_99,
-    'Estonie': round_99,
-    'Grece': round_99,
-    'Grèce': round_99,
-    'Irlande': round_99,
-    'Portugal': round_99,
-    'Croatie': round_99,
-    'Finlande': round_99,
-    'Pologne': round_99,
-    'Mexique': round_99,
-    'Israel': round_99,
-    'Israël': round_99,
-    'Perou': round_99,
-    'Pérou': round_99,
-    'Bolivie': round_99,
-    'Guatemala': round_99,
-    'Honduras': round_99,
-    'Turquie': round_99,
-    
-    # .95
-    'Allemagne': round_95,
-    'Germany': round_95,
-    'Autriche': round_95,
-    'Suisse': round_95,
-    
-    # .00 (high-context / entier)
-    'Italie': round_00,
-    'Bresil': round_00,
-    'Brésil': round_00,
-    'Hong Kong': round_00,
-    'Singapour': round_00,
-    'Argentine': round_00,
-    'Norvege': round_00,
-    'Norvège': round_00,
-    'Uruguay': round_00,
-    'Costa Rica': round_00,
-    'Afrique du Sud': round_00,
-    'Oman': round_00,
-    'Panama': round_00,
-    'Salvador': round_00,
-    'Malaisie': round_00,
-    'Jordanie': round_00,
-    'Koweit': round_00,
-    'Koweït': round_00,
-    'Liban': round_00,
-    'Bahrein': round_00,
-    'Bahreïn': round_00,
-    'Equateur': round_00,
-    'Équateur': round_00,
-    'Republique Dominicaine': round_00,
-    'République Dominicaine': round_00,
-    
-    # Scandinave (multiples de 5)
-    'Danemark': round_kr,
-    'Suede': round_kr,
-    'Suède': round_kr,
-    
-    # 990
-    'Hongrie': round_990,
-    'Republique Tcheque': round_990,
-    'République Tchèque': round_990,
-    'Tchéquie': round_990,
-    'Serbie': round_990,
-    
-    # Entier en 9 (Moyen-Orient)
-    'Arabie Saoudite': round_9_int,
-    'UAE': round_9_int,
-    'Émirats arabes unis': round_9_int,
-    'Qatar': round_9_int,
-    
-    # Milliers
-    'Chili': round_000,
-    'Colombie': round_000,
-    'Paraguay': round_000,
-}
+# Table locale de mapping pays -> fonction d'arrondi SUPPRIMÉE (Leo 2026-09-14).
+# C'était la 3e copie de ce mapping dans ce backend, avec ses propres variantes
+# orthographiques ('Grece'/'Grèce', 'Koweit'/'Koweït', 'République Tchèque' avec
+# un T majuscule qui ne matchait jamais la clé canonique...). Trois copies d'une
+# même table finissent toujours par diverger — c'est ce qui s'est passé.
+# La terminaison de chaque pays vit dans COUNTRIES[pays]["ending"], et la
+# tolérance orthographique est assurée une seule fois par
+# countries.py::resolve_country (accents, casse, ponctuation).
 
 
 def apply_psychological_ending(price: float, country: str) -> float:
-    """Applique la terminaison psychologique selon le pays"""
-    # Utiliser la fonction de terminaison appropriée
-    round_func = COUNTRY_ROUNDING.get(country)
-    
-    if round_func:
-        return round_func(price)
-    
-    # Fallback: utiliser la config COUNTRIES si disponible
-    config = COUNTRIES.get(country, {})
-    ending = config.get("ending", 0.99)
-    
-    try:
-        ending = float(ending)
-    except (ValueError, TypeError):
-        ending = 0.99
-    
-    # Si ending > 1, c'est en centimes (ex: 99), convertir en décimal (0.99)
-    if ending >= 1:
-        ending = ending / 100
-    
-    base = math.floor(price)
-    return round(base + ending, 2)
+    """
+    Applique la terminaison psychologique selon le pays.
+
+    Leo 2026-09-14 — délégué à countries.py::apply_ending (source unique).
+
+    L'ancien corps combinait une table locale (3e copie du mapping pays ->
+    terminaison, après fix_price.py et csv_processor.py) et un repli qui faisait
+    `float(COUNTRIES[pays]["ending"])`. Or ce champ est une CHAÎNE symbolique
+    ("99", "9_int", "kr", "000", "990"), pas un nombre de centimes.
+    Mesure du 14/09 : 12 des 62 pays configurés n'étaient pas dans la table et
+    tombaient donc dans ce repli. Quatre en sortaient faux :
+      - Japon ("000") et Corée du Sud ("000") : float("000") = 0.0, le test
+        `>= 1` est faux, on faisait un simple floor. Donc 22 937 JPY au lieu
+        d'un arrondi au millier — et JPY/KRW n'ont pas de décimale.
+      - République tchèque ("990") : float = 990.0 puis /100 = 9.90, les prix
+        sortaient en X,90 au lieu de X990. La table contenait bien
+        'République Tchèque' mais avec un T majuscule, qui ne correspond jamais
+        à la clé canonique 'République tchèque' — piège de casse.
+      - Émirats Arabes Unis ("9_int") : float() lève, repli .99 au lieu d'un
+        entier finissant par 9.
+    Et une divergence franche : 'Afrique du Sud' était en round_00 ici, en
+    9_int dans countries.py.
+
+    Un pays inconnu lève désormais (UnknownCountryError) au lieu de produire un
+    prix d'apparence normale.
+    """
+    return apply_ending(price, country)
 
 
 def calculate_compare_at(price: float, discount_percent: float) -> float:

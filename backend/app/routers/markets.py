@@ -4,7 +4,12 @@ Router pour la gestion des marchés Shopify
 
 from fastapi import APIRouter, HTTPException
 from app.services.shopify import shopify_service
-from app.config.countries import COUNTRIES, get_all_countries
+from app.config.countries import (
+    COUNTRIES,
+    _fold,
+    get_all_countries,
+    suggest_country_names,
+)
 from typing import List, Optional
 from pydantic import BaseModel
 
@@ -149,11 +154,79 @@ async def currency_check():
             else:
                 ok.append(entry)
 
-        unreachable = [
-            {"market": name, "config_currency": cfg.get("currency"),
-             "reason": "aucun catalog/price list live à ce nom exact — apply sans effet"}
-            for name, cfg in COUNTRIES.items() if name not in live_names
-        ]
+        # ── unreachable : pays configuré sans marché live au MÊME nom exact ──
+        # Le chemin d'écriture (shopify_service.bulk_update_prices) cherche le
+        # marché par égalité stricte de nom. Un écart d'une lettre = apply sans
+        # effet, en silence : "Market 'X' not found" n'est remonté qu'au niveau
+        # d'un apply, jamais avant.
+        #
+        # Leo 2026-09-14 — on ajoute la RAISON probable, parce que les 3 cas
+        # mesurés sur la prod sont tous des désalignements de libellé, pas des
+        # marchés manquants :
+        #     countries.py                 marché live Shopify
+        #     'République dominicaine'  vs 'République Dominique'  (DOP)
+        #     'Bahreïn'                 vs 'Bahrëin'               (EUR)
+        #     'Koweït'                  vs 'Koweit'                (EUR)
+        # C'est la piste du « bug devise DO » poursuivi par Paul depuis le 08/09
+        # (bus #5331 puis #5391) : la price list DOP n'est pas corrompue par ce
+        # backend, elle n'est simplement JAMAIS écrite par lui. Un produit sans
+        # prix fixe dans sa price list se voit servir le prix de base converti
+        # par Shopify, ce qui donne exactement le motif « DOP à parité EUR »
+        # observé sur Nera puis Soléa, pendant que les 14 produits écrits avant
+        # le renommage restent corrects.
+        # On NE corrige PAS le nom ici : trancher lequel des deux libellés est
+        # canonique rendrait 3 marchés écrivables d'un coup, donc ça change des
+        # prix. Décision Théo/Paul. Ici on rend le problème visible.
+        unreachable = []
+        for name, cfg in COUNTRIES.items():
+            if name in live_names:
+                continue
+            near = [ln for ln in live_names if ln and _fold(ln) == _fold(name)]
+            if not near:
+                near = [
+                    ln for ln in live_names
+                    if ln and (_fold(ln) in _fold(name) or _fold(name) in _fold(ln))
+                ]
+            entry = {
+                "market": name,
+                "config_currency": cfg.get("currency"),
+                "reason": "aucun catalog/price list live à ce nom exact — apply sans effet",
+            }
+            if near:
+                entry["probable_live_name"] = sorted(near)
+                entry["reason"] = (
+                    "nom désaligné avec Shopify — le marché existe live sous "
+                    + " / ".join(f"'{n}'" for n in sorted(near))
+                    + ", mais l'écriture cherche le nom exact de countries.py, "
+                    "donc tout apply sur ce pays est sans effet (silencieux)."
+                )
+            unreachable.append(entry)
+
+        # ── unconfigured : marché live SANS config countries.py ──────────────
+        # Symétrique du précédent, et jusqu'ici totalement invisible. Ces
+        # marchés sont hors de countries=['all'] et donc hors de tout pilotage
+        # prix. Mesure du 14/09 : 10 marchés live sans config, dont 'sal'
+        # (price list en DOP) et 'Nouvelle' (NZD) — des libellés manifestement
+        # tronqués, plus 'Autres', 'Global Market', 'Chypre', 'Egypte',
+        # 'Russie'. C'est la réponse à « 5 marchés hors pilotage prix »
+        # (bus #5419) : ils ne sont pas mal pilotés, ils sont inconnus du moteur.
+        unconfigured = []
+        for market in markets:
+            name = market.get("name")
+            if not name or name in COUNTRIES:
+                continue
+            price_list = market.get("priceList") or {}
+            unconfigured.append({
+                "market": name,
+                "handle": market.get("handle"),
+                "price_list_currency": price_list.get("currency"),
+                "enabled": market.get("enabled", True),
+                "suggestions": suggest_country_names(name),
+                "reason": (
+                    "marché live absent de countries.py : exclu de countries=['all'], "
+                    "donc jamais écrit par le moteur de prix."
+                ),
+            })
 
         return {
             "success": True,
@@ -163,9 +236,14 @@ async def currency_check():
                 "ok": len(ok),
                 "blocked": len(blocked),
                 "unreachable": len(unreachable),
+                "unconfigured": len(unconfigured),
+                # Verdict explicite : un lecteur (ou un cron) doit pouvoir
+                # tester un booléen sans recompter les listes.
+                "all_clear": not blocked and not unreachable and not unconfigured,
             },
             "blocked": blocked,
             "unreachable": unreachable,
+            "unconfigured": unconfigured,
             "ok": [e["market"] for e in ok],
         }
     except Exception as e:

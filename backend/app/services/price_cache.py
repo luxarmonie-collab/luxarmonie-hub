@@ -183,11 +183,59 @@ class PriceCache:
         )
         markets_without_pricelist = len(self._cache) - markets_with_pricelist
 
+        # ── FRAÎCHEUR ET COMPLÉTUDE (Leo 2026-09-14) ───────────────────────
+        # Ce statut répondait `loaded: true` quel que soit l'état réel. Mesure
+        # du 14/09 sur la prod : last_refresh = 2026-09-05 (9 jours), et
+        # progress = {markets_done: 55, total_markets: 68,
+        # current_market: "sal (PriceList)", error: null}. Autrement dit un
+        # chargement mort en cours de route au 55e marché sur 68, jamais
+        # signalé, et 55 marchés en cache pendant 9 jours.
+        #
+        # Conséquences réelles, toutes remontées par Paul sans qu'on remonte
+        # jusqu'ici :
+        #   - bus #5336 : le CSV du matin sort nb_marches=0 pour des variantes
+        #     que le contextualPricing live montre pricées sur 30/30 marchés.
+        #     Le CSV lit ce cache, pas le live.
+        #   - bus #5419 : « 5 marchés hors pilotage prix ». Un marché absent du
+        #     cache est absent de l'expansion countries=['all'], donc jamais
+        #     écrit — et rien ne le disait.
+        #
+        # `loaded` seul est un mensonge utile à personne : on expose aussi
+        # depuis combien de temps, et si le chargement est allé au bout.
+        # Ces trois champs sont ce que lisent /api/fix-price/preview (warnings)
+        # et le cron de surveillance.
+        stale_hours = None
+        if self._last_refresh:
+            stale_hours = round(
+                (datetime.now() - self._last_refresh).total_seconds() / 3600, 1
+            )
+
+        markets_expected = self._load_progress.get("total_markets") or 0
+        markets_cached = len(self._cache)
+        # complete=None tant qu'on ne sait pas combien de marchés exister ;
+        # on ne prétend pas « complet » sur une absence d'information.
+        complete = None
+        if markets_expected:
+            complete = markets_cached >= markets_expected
+
         return {
             "loaded": self._loaded,
             "loading": self._loading,
             "last_refresh": self._last_refresh.isoformat() if self._last_refresh else None,
-            "markets_count": len(self._cache),
+            "stale_hours": stale_hours,
+            "complete": complete,
+            "markets_cached": markets_cached,
+            "markets_expected": markets_expected or None,
+            "last_market_seen": self._load_progress.get("current_market"),
+            "failed_markets": self._load_progress.get("failed_markets", []),
+            "healthy": bool(
+                self._loaded
+                and complete is not False
+                and not self._load_progress.get("failed_markets")
+                and stale_hours is not None
+                and stale_hours <= 26
+            ),
+            "markets_count": markets_cached,
             "markets_with_pricelist": markets_with_pricelist,
             "markets_without_pricelist": markets_without_pricelist,
             "total_prices": total_prices,
@@ -284,6 +332,13 @@ class PriceCache:
             "markets_done": 0,
             "total_markets": 0,
             "total_prices": 0,
+            # failed_markets : la boucle Phase 1 attrape l'exception par marché
+            # et continue (c'est le bon choix — un marché cassé ne doit pas
+            # faire tomber les 67 autres). Mais le marché disparaissait alors
+            # du cache SANS trace : ni erreur, ni compteur, ni nom. Un marché
+            # absent du cache est un marché hors pilotage prix, ce qui s'est
+            # lu côté Paul comme « variante jamais pricée ». On nomme.
+            "failed_markets": [],
             "error": None
         }
 
@@ -357,6 +412,9 @@ class PriceCache:
 
                 except Exception as e:
                     logger.error(f"Error loading prices for {market_name}: {e}")
+                    self._load_progress["failed_markets"].append(
+                        {"market": market_name, "reason": str(e)[:300]}
+                    )
 
             # ==== PHASE 2: Marchés SANS PriceList ====
             logger.info("--- Phase 2: Adding markets without PriceLists ---")

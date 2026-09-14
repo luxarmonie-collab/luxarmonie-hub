@@ -7,7 +7,17 @@ Router pour la correction de prix individuels
 from fastapi import APIRouter, HTTPException
 from app.services.shopify import shopify_service
 from app.services.price_cache import price_cache
-from app.config.countries import COUNTRIES
+from app.config.countries import (
+    COUNTRIES,
+    NO_DECIMAL_CURRENCIES,
+    UnknownCountryError,
+    apply_ending,
+    get_currency_strict,
+    get_exchange_rate_strict,
+    is_known_country,
+    resolve_country,
+    suggest_country_names,
+)
 from typing import List, Optional, Dict
 from pydantic import BaseModel
 import math
@@ -44,115 +54,161 @@ class CopyVariantApplyRequest(CopyVariantRequest):
     dry_run: bool = False
 
 
-# ========================================
-# FONCTIONS DE TERMINAISON
-# ========================================
-
-def round_99(price: float) -> float:
-    return float(math.floor(price)) + 0.99
-
-def round_95(price: float) -> float:
-    return float(math.floor(price)) + 0.95
-
-def round_00(price: float) -> float:
-    return float(round(price))
-
-def round_9_int(price: float) -> float:
-    base = int(price)
-    last = base % 10
-    if last == 9:
-        return float(base)
-    elif last < 9:
-        return float(base - last + 9) if base >= 10 else float(9)
-    return float(base - 1)
-
-def round_000(price: float) -> float:
-    thousands = round(price / 1000)
-    return float(max(thousands, 1) * 1000)
-
-def round_990(price: float) -> float:
-    base = int(price)
-    if base >= 10000:
-        return float((base // 1000) * 1000 + 990)
-    elif base >= 1000:
-        return float((base // 100) * 100 + 90)
-    else:
-        return float((base // 10) * 10 + 9)
-
-def round_kr(price: float) -> float:
-    return float(round(price / 5) * 5)
-
-
-COUNTRY_ROUNDING = {
-    # .99
-    'France': round_99, 'USA': round_99, 'UK': round_99, 'Canada': round_99,
-    'Australie': round_99, 'Belgique': round_99, 'Espagne': round_99,
-    'Pays-Bas': round_99, 'Luxembourg': round_99, 'ESTONIE': round_99,
-    'Grèce': round_99, 'Irlande': round_99, 'Portugal': round_99,
-    'Croatie': round_99, 'Finlande': round_99, 'Pologne': round_99,
-    'Mexique': round_99, 'Israël': round_99, 'Pérou': round_99,
-    'Bolivie': round_99, 'Guatemala': round_99, 'Honduras': round_99,
-    'Turquie': round_99, 'Nouvelle Zélande': round_99,
-    
-    # .95
-    'Allemagne': round_95, 'Autriche': round_95, 'Suisse': round_95,
-    
-    # .00
-    'Italie': round_00, 'Brésil': round_00, 'Hong Kong': round_00,
-    'Honk Hong': round_00, 'SINGAPOUR': round_00, 'Argentine': round_00,
-    'Norvège': round_00, 'Uruguay': round_00, 'Costa Rica': round_00,
-    'Afrique du Sud': round_00, 'Équateur': round_00, 'Bahreïn': round_00,
-    'Panama': round_00, 'Salvador': round_00, 'Malaisie': round_00,
-    
-    # Scandinave
-    'Danemark': round_kr, 'Suède': round_kr,
-    
-    # 990
-    'Hongrie': round_990, 'République tchèque': round_990, 'Serbie': round_990,
-    
-    # 9 entier
-    'Arabie Saoudite': round_9_int, 'Émirats Arabes Unis': round_9_int, 'Qatar': round_9_int,
-    
-    # Milliers
-    'Chili': round_000, 'Colombie': round_000, 'Paraguay': round_000,
-}
+# ════════════════════════════════════════════════════════════════════════════
+# CALCUL — délégué à app/config/countries.py (source unique)
+#
+# Leo 2026-09-14. Ce fichier portait sa PROPRE table COUNTRY_ROUNDING de 52
+# entrées, dérivée du champ `ending` de countries.py. Écarts mesurés sur les
+# 62 pays configurés avant suppression :
+#   - 10 pays absents de la table -> arrondis en .99 par défaut, dont Japon
+#     (JPY) et Corée du Sud (KRW) qui doivent finir en 000. C'est la source du
+#     « JP 22 937,99 JPY » remonté par Paul (bus #5391) : des centimes sur une
+#     devise qui n'en a pas. Également Koweït/Oman/Jordanie/Liban/Pakistan
+#     (attendus en 00), Bulgarie/Roumanie/République dominicaine.
+#   - Afrique du Sud en 00 ici, 9_int dans countries.py.
+#   - clé morte 'Hong Kong' (le marché Shopify s'appelle 'Honk Hong').
+# Une table dupliquée finit toujours par dériver de son original. Il n'y en a
+# plus qu'une : COUNTRIES[pays]["ending"].
+# ════════════════════════════════════════════════════════════════════════════
 
 
 def get_exchange_rate(country: str) -> float:
-    """Récupère le taux de change pour un pays"""
-    config = COUNTRIES.get(country, {})
-    return config.get("exchange_rate", 1.0)
+    """Taux de change. Lève UnknownCountryError sur pays inconnu (plus de 1.0)."""
+    return get_exchange_rate_strict(country)
 
 
 def get_currency(country: str) -> str:
-    """Récupère la devise pour un pays"""
-    config = COUNTRIES.get(country, {})
-    return config.get("currency", "EUR")
+    """Devise déclarée. Lève UnknownCountryError sur pays inconnu (plus de 'EUR')."""
+    return get_currency_strict(country)
 
 
 def calculate_price_for_country(base_price_eur: float, country: str) -> float:
     """
-    Calcule le prix pour un pays donné à partir d'un prix EUR de référence.
-    Applique: taux de change + terminaison psychologique
+    Prix pour un pays à partir d'un prix EUR de référence.
+    Applique : taux de change + terminaison psychologique du pays.
+
+    ⚠️ LIMITE CONNUE, NON CORRIGÉE ICI — décision business en attente.
+    Le champ `adjustment` de countries.py ('vat' -> -12% puis +TVA locale,
+    'minus_10' -> -10%) n'est PAS appliqué : on multiplie la base par le taux
+    BRUT. Conséquence mesurée par Paul (bus #5364, 11/09) : le ratio
+    preview/base vaut exactement l'exchange_rate (UK 0.88) alors que le ratio
+    réel du store est 0.757 — un apply piloté par ce moteur remonterait
+    UK/US/JP/KR/CH d'environ +16 %.
+    Le correctif technique est prêt et documenté depuis le 15/06 dans
+    agents/LuminairePricing/BRIEF-TVA-fix-price-2026-06-15.md : câbler
+    services/pricing_engine.py::calculate_price() ici. Il n'est PAS appliqué
+    parce qu'il reprix TOUT le catalogue et que la config elle-même est en
+    question (France vat=0.19 ou 0.20 ? USA exchange_rate=1.20 = markup ou
+    bug ?). Ça se tranche avec Théo, pas dans un commit.
+    En attendant, /preview le DIT (champ `warnings`) au lieu de laisser croire
+    que le calcul est complet.
     """
-    exchange_rate = get_exchange_rate(country)
+    exchange_rate = get_exchange_rate_strict(country)
     converted = base_price_eur * exchange_rate
-    
-    # Appliquer la terminaison psychologique
-    round_func = COUNTRY_ROUNDING.get(country, round_99)
-    return round_func(converted)
+    return apply_ending(converted, country)
 
 
 def format_price(price: float, country: str) -> str:
-    """Formate le prix selon le pays"""
-    config = COUNTRIES.get(country, {})
-    currency = config.get("currency", "EUR")
-    
-    no_decimal = ["HUF", "CZK", "RSD", "CLP", "COP", "PYG", "SAR", "QAR", "AED", "DKK", "SEK", "NOK", "HKD", "CRC", "UYU", "DOP"]
-    
-    if currency in no_decimal:
+    """Formate le prix selon la devise du pays."""
+    currency = get_currency_strict(country)
+    if currency in NO_DECIMAL_CURRENCIES:
         return str(int(price))
     return f"{price:.2f}"
+
+
+def _resolve_requested_countries(requested: List[str]) -> tuple:
+    """
+    Transforme la liste de pays demandée en (pays_canoniques, warnings).
+
+    Deux régimes, volontairement différents :
+
+    - Pays nommés EXPLICITEMENT par l'appelant : un nom inconnu est une FAUTE,
+      on lève (400). Demande de Paul (bus #5338) : « rejeter en 400 tout nom de
+      pays absent de countries.py plutôt que de faire un fallback ». Une faute
+      de frappe ne doit pas produire un preview d'apparence valide visant une
+      autre price list.
+
+    - Expansion de 'all' : les noms viennent du cache Shopify, pas de
+      l'appelant. Lever ferait tomber le récap quotidien de Paul à la première
+      création de marché. On IGNORE donc les marchés non configurés, mais on
+      les NOMME dans les warnings : un skip anonyme cache un incident (65 pros
+      bloqués 4 semaines derrière un `skipped` fourre-tout, août 2026).
+    """
+    warnings: List[str] = []
+    if 'all' in requested:
+        live_markets = price_cache.get_all_markets()
+        if not live_markets:
+            warnings.append(
+                "Cache prix vide : 'all' est retombé sur les 62 pays de countries.py. "
+                "Les prix actuels affichés seront tous vides. Lancer POST /api/cache/refresh."
+            )
+            return list(COUNTRIES.keys()), warnings
+        known = [m for m in live_markets if is_known_country(m)]
+        unknown = [m for m in live_markets if not is_known_country(m)]
+        if unknown:
+            warnings.append(
+                f"{len(unknown)} marché(s) Shopify live IGNORÉ(S) par 'all' faute de config "
+                f"dans countries.py — aucun prix ne leur sera proposé : "
+                + ", ".join(f"'{u}'" for u in sorted(unknown))
+                + ". Voir GET /api/markets/currency-check (section unconfigured)."
+            )
+        missing = [c for c in COUNTRIES if not any(is_known_country(m) and resolve_country(m) == c for m in live_markets)]
+        if missing:
+            warnings.append(
+                f"{len(missing)} pays configuré(s) ABSENT(S) du cache prix, donc hors de 'all' "
+                f"(cache incomplet ou marché non créé côté Shopify) : "
+                + ", ".join(f"'{m}'" for m in sorted(missing))
+                + ". Voir GET /api/cache/status."
+            )
+        return [resolve_country(m) for m in known], warnings
+
+    unknown = [c for c in requested if not is_known_country(c)]
+    if unknown:
+        detail = {
+            "error": "unknown_country",
+            "message": (
+                "Nom(s) de pays absent(s) de countries.py. Refus explicite : un nom "
+                "inconnu produisait avant un preview en EUR au taux 1.0, qui appliqué "
+                "aurait écrit le prix de base brut dans une price list partagée."
+            ),
+            "unknown_countries": unknown,
+            "suggestions": {c: suggest_country_names(c) for c in unknown},
+            "valid_countries": sorted(COUNTRIES.keys()),
+        }
+        raise HTTPException(status_code=400, detail=detail)
+    return [resolve_country(c) for c in requested], warnings
+
+
+def _engine_warnings(countries: List[str]) -> List[str]:
+    """
+    Réserves à joindre à TOUT preview. Objectif : que le lecteur du preview
+    n'ait pas à re-diagnostiquer le moteur à chaque fois (Paul l'a refait le
+    11/09 puis le 12/09 puis le 13/09).
+    """
+    out: List[str] = []
+    out.append(
+        "MOTEUR INCOMPLET — `adjustment` ('vat' / 'minus_10') non appliqué : "
+        "new_price = base_eur x exchange_rate brut x terminaison. Les prix live du "
+        "store intègrent l'adjustment, donc un apply piloté par ce preview DÉCALE "
+        "les prix (≈ +16 % sur UK/US/JP/KR/CH). Décision Théo en attente depuis le "
+        "2026-06-15 (BRIEF-TVA-fix-price-2026-06-15.md). Ne pas appliquer en masse."
+    )
+    cache_status = price_cache.get_status()
+    if cache_status.get("stale_hours") is not None and cache_status["stale_hours"] > 26:
+        out.append(
+            f"Cache prix daté de {cache_status['stale_hours']}h "
+            f"(dernier refresh {cache_status.get('last_refresh')}) : les `current_price` "
+            f"affichés peuvent être périmés. Lancer POST /api/cache/refresh."
+        )
+    if cache_status.get("complete") is False:
+        out.append(
+            f"Cache prix INCOMPLET — {cache_status.get('markets_cached')} marché(s) en cache "
+            f"pour {cache_status.get('markets_expected')} attendus "
+            f"(dernier marché traité : {cache_status.get('last_market_seen')}). "
+            f"Les marchés manquants sortent en current_price=null, ce qui ressemble à "
+            f"« jamais pricé » alors que le live a des prix."
+        )
+    return out
 
 
 # ========================================
@@ -166,15 +222,24 @@ async def preview_fix_price(request: FixPriceRequest):
     Calcule les nouveaux prix pour tous les marchés à partir du prix EUR de référence.
     """
     try:
-        # Déterminer les marchés
-        if 'all' in request.countries:
-            countries = price_cache.get_all_markets()
-        else:
-            countries = request.countries
-        
+        # Résolution STRICTE des marchés demandés (plus de fallback EUR muet).
+        # HTTPException(400) remonte telle quelle : voir le `except HTTPException`
+        # plus bas — sans lui, le `except Exception` la retransformait en 500 et
+        # l'appelant perdait la liste des noms valides.
+        countries, country_warnings = _resolve_requested_countries(request.countries)
         if not countries:
-            countries = list(COUNTRIES.keys())
-        
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "no_target_market",
+                    "message": (
+                        "Aucun marché exploitable après résolution. Le cache prix est "
+                        "probablement vide ou ne contient que des marchés non configurés."
+                    ),
+                },
+            )
+
+        warnings = _engine_warnings(countries) + country_warnings
         preview_items = []
         
         # Récupérer les infos des variantes
@@ -228,7 +293,14 @@ async def preview_fix_price(request: FixPriceRequest):
                     "current_compare_at": format_price(current_compare_at, country) if current_compare_at else None,
                     "new_price": format_price(new_price, country),
                     "new_compare_at": format_price(new_compare_at, country) if new_compare_at else None,
-                    "price_diff_percent": price_diff
+                    "price_diff_percent": price_diff,
+                    # Calcul exposé ligne à ligne : Paul a dû mesurer le ratio
+                    # new/base à la main pour découvrir que l'adjustment sautait.
+                    # Le preview doit montrer son propre calcul.
+                    "exchange_rate": COUNTRIES[country]["exchange_rate"],
+                    "ending": COUNTRIES[country]["ending"],
+                    "adjustment_declared": COUNTRIES[country]["adjustment"],
+                    "adjustment_applied": False,
                 })
         
         return {
@@ -238,11 +310,25 @@ async def preview_fix_price(request: FixPriceRequest):
                 "countries_count": len(countries),
                 "total_updates": len(preview_items),
                 "base_price_eur": request.base_price_eur,
-                "compare_at_price_eur": request.compare_at_price_eur
+                "compare_at_price_eur": request.compare_at_price_eur,
+                # adjustment_applied=False est explicite et non négociable tant que
+                # le brief TVA n'est pas tranché. Un lecteur (humain ou script) doit
+                # pouvoir tester ce booléen au lieu de lire une note de bas de page.
+                "adjustment_applied": False,
+                "warnings_count": len(warnings),
             },
+            "warnings": warnings,
             "preview": preview_items
         }
-    
+
+    except HTTPException:
+        raise
+    except UnknownCountryError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "unknown_country", "message": str(e),
+                    "suggestions": e.suggestions},
+        )
     except Exception as e:
         import traceback
         traceback.print_exc()
